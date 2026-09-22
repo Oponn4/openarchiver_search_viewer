@@ -212,8 +212,15 @@ function updateNavButtons() {
   navDownButton.disabled = currentIndex === -1 || currentIndex >= currentItems.length - 1;
 }
 
+function isMobileLayout() {
+  return window.matchMedia("(max-width: 760px)").matches;
+}
+
 async function setViewer(item) {
   selectedId = item.id;
+  if (isMobileLayout()) {
+    document.body.classList.add("mobile-detail-open");
+  }
   updateNavButtons();
   const url = `/mail/${encodeURIComponent(item.id)}`;
   viewerSubject.textContent = item.subject || translate("noSubject");
@@ -674,7 +681,13 @@ async function runSearch() {
     }
     
     if (currentItems.length > 0) {
-      setViewer(currentItems[0]);
+      if (isMobileLayout()) {
+        selectedId = "";
+        document.body.classList.remove("mobile-detail-open");
+        renderResults();
+      } else {
+        setViewer(currentItems[0]);
+      }
     } else {
       renderResults();
     }
@@ -735,3 +748,8 @@ document.querySelector("#logout-button")?.addEventListener("click", async () => 
 });
 
 runSearch();
+
+
+document.querySelector("#mobile-back-button")?.addEventListener("click", () => {
+  document.body.classList.remove("mobile-detail-open");
+});

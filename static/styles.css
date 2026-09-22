@@ -755,10 +755,51 @@ mark {
   color: #b42318;
 }
 
+.mobile-back-button {
+  display: none;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid #c8d1dc;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1e4fd7;
+  cursor: pointer;
+  padding: 0;
+}
+
 @media (max-width: 760px) {
+  /* Outlook-artige Einzelspalte: Liste ODER Vorschau, nicht beides gequetscht.
+     Default = Liste ueber den vollen verfuegbaren Platz; erst ein Tap auf ein
+     Ergebnis (setViewer, siehe app.js) schaltet body.mobile-detail-open ein und
+     tauscht auf die Vorschau um, der Zurueck-Pfeil schaltet zurueck. */
   .app-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(280px, 46vh) minmax(300px, 1fr);
+    grid-template-rows: 1fr;
+  }
+
+  .search-pane,
+  .viewer-pane {
+    grid-row: 1 / -1;
+    grid-column: 1 / -1;
+  }
+
+  .viewer-pane {
+    display: none;
+  }
+
+  body.mobile-detail-open .search-pane {
+    display: none;
+  }
+
+  body.mobile-detail-open .viewer-pane {
+    display: flex;
+  }
+
+  .mobile-back-button {
+    display: inline-flex;
   }
 
   .search-pane {
