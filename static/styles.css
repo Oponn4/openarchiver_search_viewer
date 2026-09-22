@@ -62,9 +62,14 @@ body {
 
 .app-title span {
   color: #000000;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .logout-button {
+  flex-shrink: 0;
   background: #ffffff;
   display: inline-flex;
   align-items: center;
@@ -118,6 +123,7 @@ body {
 
 .search-input-wrapper input {
   flex: 1;
+  min-width: 0;
   height: 40px;
   padding: 0 16px 0 44px;
   border: 2px solid #e2e8f0;
@@ -140,6 +146,8 @@ body {
 }
 
 .search-input-wrapper button {
+  flex-shrink: 0;
+  white-space: nowrap;
   height: 40px;
   padding: 0 20px;
   border: none;
