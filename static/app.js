@@ -29,6 +29,27 @@ let selectedId = "";
 let detailRequestToken = 0;
 const fetchedMailIds = new Set();
 
+
+const AVATAR_COLORS = [
+  '#e17055', '#0984e3', '#00b894', '#6c5ce7', '#e84393',
+  '#fdcb6e', '#00cec9', '#d63031', '#0abde3', '#a29bfe',
+];
+
+function senderDisplayName(from) {
+  if (!from) return '';
+  const m = from.match(/^\s*"?([^"<]+?)"?\s*<[^>]+>\s*$/);
+  return (m ? m[1] : from).trim();
+}
+
+function avatarLetterAndColor(from) {
+  const name = senderDisplayName(from) || (from || '').split('@')[0] || '?';
+  const letter = name.trim().charAt(0).toUpperCase() || '?';
+  let hash = 0;
+  for (let i = 0; i < name.length; i += 1) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  const color = AVATAR_COLORS[hash % AVATAR_COLORS.length];
+  return { letter, color };
+}
+
 function isExactMode() {
   return Boolean(exactInput?.checked);
 }
@@ -581,6 +602,13 @@ function renderResults() {
     sender.className = "sender";
     sender.textContent = item.from || translate("noSender");
 
+    const { letter, color } = avatarLetterAndColor(item.from);
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.style.background = color;
+    avatar.textContent = letter;
+    avatar.setAttribute("aria-hidden", "true");
+
     const preview = document.createElement("div");
     preview.className = "preview";
     const attachmentText = item.attachmentCount > 0 ? `${translate("attachmentsShort", { count: item.attachmentCount })} · ` : "";
@@ -590,7 +618,7 @@ function renderResults() {
       preview.textContent = `${attachmentText}${item.snippet || item.bodyPreview || ""}`;
     }
 
-    button.append(subject, date, preview, sender);
+    button.append(avatar, subject, date, preview, sender);
     fragment.appendChild(button);
   });
 
