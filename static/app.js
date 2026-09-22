@@ -659,6 +659,14 @@ async function runSearch() {
       sort: currentSort(),
       exact: isExactMode() ? "true" : "false",
     });
+
+    // Suche in der URL spiegeln: der Browser-Zurueck (Geste oder Knopf) und ein normales
+    // Neuladen fanden sonst nichts, weil der App-Zustand ausschliesslich in JS-Variablen lebte.
+    const nextUrl = `?${params.toString()}`;
+    if (`${location.pathname}${location.search}` !== `/${nextUrl}`) {
+      history.pushState({ q, limit, sort: currentSort(), exact: isExactMode() }, "", nextUrl);
+    }
+
     const response = await fetch(`/api/search?${params.toString()}`);
     if (response.status === 401) {
       window.location.href = '/login';
@@ -728,6 +736,34 @@ async function runSearch() {
   }
 }
 
+
+function restoreStateFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const q = params.get("q");
+  if (q === null) return false;
+  queryInput.value = q;
+  if (exactInput) exactInput.checked = params.get("exact") === "true";
+  const limitParam = Number(params.get("limit"));
+  if (Number.isFinite(limitParam) && limitParam > 0) {
+    limitInput.value = String(limitParam);
+    updateLimitDisplay();
+  }
+  const sortParam = params.get("sort");
+  if (sortParam) {
+    sortButtons.forEach((button) => {
+      const isActive = button.dataset.sort === sortParam;
+      button.classList.toggle("active", isActive);
+      button.setAttribute("aria-pressed", isActive ? "true" : "false");
+    });
+  }
+  return true;
+}
+
+window.addEventListener("popstate", () => {
+  restoreStateFromUrl();
+  runSearch();
+});
+
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   runSearch();
@@ -750,6 +786,7 @@ limitInput.addEventListener("change", () => {
 
 updateLimitDisplay();
 renderSearchHistory();
+restoreStateFromUrl();
 
 sortButtons.forEach((button) => {
   button.addEventListener("click", () => setSort(button.dataset.sort));
