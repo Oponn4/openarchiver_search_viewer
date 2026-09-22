@@ -105,9 +105,15 @@
         </div>
         <div class="viewer-actions" style="display: flex; gap: 8px;">
           <a id="download-eml-link" class="open-link" href="#" download aria-disabled="true"
-            data-i18n="downloadEml">.eml 다운로드</a>
+            data-i18n-attr="aria-label:downloadEml,title:downloadEml" aria-label=".eml 다운로드" title=".eml 다운로드">
+            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            <span class="action-label" data-i18n="downloadEml">.eml 다운로드</span>
+          </a>
           <a id="open-link" class="open-link" href="#" target="_blank" rel="noreferrer" aria-disabled="true"
-            data-i18n="openInNewWindow">새 창에서 열기</a>
+            data-i18n-attr="aria-label:openInNewWindow,title:openInNewWindow" aria-label="새 창에서 열기" title="새 창에서 열기">
+            <svg class="action-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+            <span class="action-label" data-i18n="openInNewWindow">새 창에서 열기</span>
+          </a>
         </div>
       </div>
       <div id="mail-detail" class="mail-detail">

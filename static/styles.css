@@ -497,6 +497,9 @@ mark {
 
 .open-link {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 8px 10px;
   border: 1px solid #c8d1dc;
   border-radius: 6px;
@@ -504,6 +507,11 @@ mark {
   text-decoration: none;
   font-size: 13px;
   font-weight: 650;
+}
+
+.action-icon {
+  display: none;
+  flex-shrink: 0;
 }
 
 .open-link[aria-disabled="true"] {
@@ -816,6 +824,33 @@ mark {
 
   .mobile-back-button {
     display: inline-flex;
+  }
+
+  /* Zwei Text-Buttons (Download .eml + Open in new window) passen bei 390px nicht mehr
+     neben Zurueck-Pfeil und Titel -- gemessen: rechter Rand lief bis x=506 raus. Auf schmalen
+     Screens deshalb wie den Zurueck-Pfeil nur noch Icons zeigen, Text bleibt fuer Screenreader
+     ueber aria-label/title erhalten. */
+  .action-icon {
+    display: block;
+  }
+
+  .action-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .open-link {
+    padding: 0;
+    width: 36px;
+    height: 36px;
+    justify-content: center;
   }
 
   .search-pane {
