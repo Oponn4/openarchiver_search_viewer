@@ -341,27 +341,63 @@ function renderDetail(item) {
     frame.title = translate("mailHtmlBody");
     frame.setAttribute("sandbox", "allow-same-origin");
     frame.setAttribute("scrolling", "no");
-    
-    const imageStyle = "<style>img { max-width: 100% !important; max-height: 700px !important; width: auto !important; height: auto !important; object-fit: contain !important; } mark { background: #fff1a8; color: inherit; padding: 0 2px; border-radius: 3px; }</style>";
-    frame.srcdoc = imageStyle + item.bodyHtml;
-    
+
+    // Tote externe Bilder ausblenden (haeufig bei alten Marketing-Mails: Tracking-/CDN-Domains
+    // von vor Jahren, DNS loest oft nicht mehr auf), sonst zeigt der Browser sein haessliches
+    // kaputt-Icon. Aufgerufen sowohl aus frame.onload (Normalfall: alle Bilder settlen schnell)
+    // als auch unabhaengig per Timer (deckt ab, dass EIN Host nicht sauber ablehnt, sondern die
+    // Verbindung haengen laesst -- dann wartet frame.onload praktisch endlos, weil es erst
+    // feuert, wenn wirklich JEDES Bild fertig ist; beobachtet an einer Mail mit 84 Bildern,
+    // mehrere davon auf demselben haengenden Host). sandbox="allow-same-origin" (ohne
+    // allow-scripts) erlaubt der Elternseite trotzdem, Listener direkt auf die iframe-Elemente
+    // zu haengen -- das Verbot gilt nur fuer <script> INNERHALB des sandboxten Dokuments selbst.
+    // Idempotent, darf mehrfach laufen.
+    const hideBrokenImages = (giveUpOnPending = false) => {
+      let doc;
+      try {
+        doc = frame.contentWindow.document;
+      } catch (e) {
+        return;
+      }
+      const hideIfBroken = (img) => {
+        if (img.style.display === "none") return;
+        img.style.display = "none";
+        const newHeight = Math.max(doc.documentElement.scrollHeight, doc.body ? doc.body.scrollHeight : 0);
+        if (newHeight > 0) frame.style.height = newHeight + "px";
+      };
+      doc.querySelectorAll("img").forEach((img) => {
+        if (img.complete && img.naturalWidth === 0) {
+          hideIfBroken(img);
+        } else if (!img.complete && giveUpOnPending) {
+          // Eine Verbindung, die einfach nie antwortet statt sauber abzulehnen, feuert bei
+          // manchen Hosts erst nach Minuten ein error-Event (TCP-Timeout, nicht DNS). Nach 8s
+          // ist das fuer die Anzeige kein "gleich fertig" mehr -- lieber ausblenden, als dass
+          // die Seite auf unbestimmte Zeit eine grosse leere Box zeigt.
+          hideIfBroken(img);
+        } else if (!img.complete && !img.dataset.errorListenerAttached) {
+          img.dataset.errorListenerAttached = "1";
+          img.addEventListener("error", () => hideIfBroken(img), { once: true });
+        }
+      });
+    };
+
     frame.onload = () => {
       try {
         const doc = frame.contentWindow.document;
-        
+
         if (terms.length > 0) {
           const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, null, false);
           const nodes = [];
           while(walker.nextNode()) nodes.push(walker.currentNode);
-          
+
           nodes.forEach(node => {
             if(node.parentNode && node.parentNode.nodeName !== 'SCRIPT' && node.parentNode.nodeName !== 'STYLE') {
               let text = node.nodeValue;
               if(!text.trim()) return;
-              
+
               let replaced = false;
               let escapedText = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-              
+
               terms.forEach(term => {
                 const escapedTerm = term.replace(/[.*+?^$()|[\]{}]/g, '\\$&');
                 const regex = new RegExp('(' + escapedTerm + ')', 'gi');
@@ -371,7 +407,7 @@ function renderDetail(item) {
                   replaced = true;
                 }
               });
-              
+
               if(replaced) {
                 const span = doc.createElement('span');
                 span.innerHTML = escapedText;
@@ -381,12 +417,26 @@ function renderDetail(item) {
           });
         }
 
+        hideBrokenImages();
+
         const height = Math.max(doc.documentElement.scrollHeight, doc.body ? doc.body.scrollHeight : 0);
         frame.style.height = height + "px";
       } catch (e) {
         console.error("Failed to resize or highlight iframe:", e);
       }
     };
+
+    // Unabhaengig vom load-Event: nach 2s einmal proaktiv pruefen (holt die schnellen Faelle,
+    // z.B. DNS-NXDOMAIN). Nach 8s wird bei allem, was dann noch offen ist, aufgegeben statt
+    // weiter auf ein error-Event zu warten -- gemessen an einer Mail mit 84 Bildern: die
+    // haengenden Verbindungen zu einem toten Tracking-Host waren nach 35s immer noch nicht
+    // gescheitert (kein Timeout, kein Fehler, einfach nichts).
+    setTimeout(() => hideBrokenImages(false), 2000);
+    setTimeout(() => hideBrokenImages(true), 8000);
+
+    const imageStyle = "<style>img { max-width: 100% !important; max-height: 700px !important; width: auto !important; height: auto !important; object-fit: contain !important; } mark { background: #fff1a8; color: inherit; padding: 0 2px; border-radius: 3px; }</style>";
+    frame.srcdoc = imageStyle + item.bodyHtml;
+
     body.appendChild(frame);
   } else {
     const rawText = item.body || item.bodyPreview || translate("noBodyInSearchResult");
