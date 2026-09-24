@@ -65,7 +65,33 @@
                 <span id="limit-max-value" class="limit-bound">100</span>
               </div>
             </div>
+            <button id="advanced-toggle" type="button" class="advanced-toggle" aria-expanded="false"
+              aria-controls="advanced-panel" data-i18n="advanced">고급</button>
           </div>
+        </div>
+        <div id="advanced-panel" class="advanced-panel" hidden>
+          <div class="advanced-field">
+            <label for="from-input" data-i18n="fromLabel">보낸사람</label>
+            <input id="from-input" name="from" type="text" autocomplete="off"
+              placeholder="name@example.com" data-i18n-attr="placeholder:fromPlaceholder" />
+          </div>
+          <div class="advanced-field">
+            <label for="date-from-input" data-i18n="dateFromLabel">시작일</label>
+            <input id="date-from-input" name="date_from" type="date" />
+          </div>
+          <div class="advanced-field">
+            <label for="date-to-input" data-i18n="dateToLabel">종료일</label>
+            <input id="date-to-input" name="date_to" type="date" />
+          </div>
+          <div class="advanced-field">
+            <label for="attachment-input" data-i18n="attachmentLabel">첨부파일</label>
+            <select id="attachment-input" name="has_attachment">
+              <option value="" data-i18n="attachmentAny">모두</option>
+              <option value="true" data-i18n="attachmentYes">있음</option>
+              <option value="false" data-i18n="attachmentNo">없음</option>
+            </select>
+          </div>
+          <button id="advanced-reset" type="button" class="advanced-reset" data-i18n="advancedReset">초기화</button>
         </div>
       </form>
       <div class="meta-row">

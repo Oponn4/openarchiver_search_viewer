@@ -92,6 +92,16 @@ I18N = {
         "exact": "완전일치",
         "limitTitle": "값을 늘릴 수록 검색어와 덜 일치하는 메일까지 나타납니다.",
         "limit": "결과수",
+        "advanced": "고급",
+        "advancedReset": "초기화",
+        "fromLabel": "보낸사람",
+        "fromPlaceholder": "발신자 이메일",
+        "dateFromLabel": "시작일",
+        "dateToLabel": "종료일",
+        "attachmentLabel": "첨부파일",
+        "attachmentAny": "모두",
+        "attachmentYes": "있음",
+        "attachmentNo": "없음",
         "enterSearchTerm": "검색어를 입력하세요.",
         "previousMail": "이전 메일",
         "nextMail": "다음 메일",
@@ -166,6 +176,16 @@ I18N = {
         "exact": "Exact match",
         "limitTitle": "Increase this value to include more loosely matching mail.",
         "limit": "Results",
+        "advanced": "Advanced",
+        "advancedReset": "Reset",
+        "fromLabel": "From",
+        "fromPlaceholder": "name@example.com",
+        "dateFromLabel": "From date",
+        "dateToLabel": "To date",
+        "attachmentLabel": "Attachment",
+        "attachmentAny": "Any",
+        "attachmentYes": "Yes",
+        "attachmentNo": "No",
         "enterSearchTerm": "Enter search terms.",
         "previousMail": "Previous mail",
         "nextMail": "Next mail",
@@ -926,6 +946,10 @@ def search_emails(
     limit: int = Query(30, ge=MIN_SEARCH_LIMIT),
     sort: str = Query("relevance", pattern="^(relevance|asc|desc)$"),
     exact: bool = Query(False),
+    sender: str | None = Query(None, max_length=320),
+    date_from: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    has_attachment: bool | None = Query(None),
 ) -> dict[str, Any]:
     settings = SETTINGS
     limit = min(limit, settings.search_max_limit)
@@ -951,6 +975,17 @@ def search_emails(
         "limit": str(limit),
         "matchingStrategy": settings.search_matching_strategy,
     }
+    # Erweiterte Filter (Outlook/eM-Client-Stil: Absender, Zeitraum, Anhang) -- reichen 1:1
+    # an OpenArchivers eigene Parameter durch, die koennen das schon laenger, unsere UI
+    # hat es bisher nur nie angeboten.
+    if sender and sender.strip():
+        params["from"] = sender.strip()
+    if date_from:
+        params["dateFrom"] = date_from
+    if date_to:
+        params["dateTo"] = date_to
+    if has_attachment is not None:
+        params["hasAttachments"] = "true" if has_attachment else "false"
 
     session = openarchiver_session()
 

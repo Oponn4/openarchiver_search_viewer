@@ -5,6 +5,13 @@ const limitInput = document.querySelector("#limit-input");
 const limitValue = document.querySelector("#limit-value");
 const limitMaxValue = document.querySelector("#limit-max-value");
 const exactInput = document.querySelector("#exact-input");
+const advancedToggle = document.querySelector("#advanced-toggle");
+const advancedPanel = document.querySelector("#advanced-panel");
+const advancedReset = document.querySelector("#advanced-reset");
+const fromInput = document.querySelector("#from-input");
+const dateFromInput = document.querySelector("#date-from-input");
+const dateToInput = document.querySelector("#date-to-input");
+const attachmentInput = document.querySelector("#attachment-input");
 const sortButtons = Array.from(document.querySelectorAll(".sort-button"));
 const searchButton = document.querySelector("#search-button");
 const resultList = document.querySelector("#result-list");
@@ -709,6 +716,14 @@ async function runSearch() {
       sort: currentSort(),
       exact: isExactMode() ? "true" : "false",
     });
+    // Erweiterte Filter nur setzen, wenn ausgefuellt -- der leere String wuerde beim
+    // Backend gegen das Datumsmuster ("^\d{4}-\d{2}-\d{2}$") scheitern; nicht mitgeschickt
+    // bleibt der jeweilige FastAPI-Parameter auf seinem Default None.
+    const sender = (fromInput?.value || "").trim();
+    if (sender) params.set("sender", sender);
+    if (dateFromInput?.value) params.set("date_from", dateFromInput.value);
+    if (dateToInput?.value) params.set("date_to", dateToInput.value);
+    if (attachmentInput?.value) params.set("has_attachment", attachmentInput.value);
 
     // Suche in der URL spiegeln: der Browser-Zurueck (Geste oder Knopf) und ein normales
     // Neuladen fanden sonst nichts, weil der App-Zustand ausschliesslich in JS-Variablen lebte.
@@ -806,6 +821,18 @@ function restoreStateFromUrl() {
       button.setAttribute("aria-pressed", isActive ? "true" : "false");
     });
   }
+  const sender = params.get("sender");
+  const dateFrom = params.get("date_from");
+  const dateTo = params.get("date_to");
+  const hasAttachment = params.get("has_attachment");
+  if (fromInput) fromInput.value = sender || "";
+  if (dateFromInput) dateFromInput.value = dateFrom || "";
+  if (dateToInput) dateToInput.value = dateTo || "";
+  if (attachmentInput) attachmentInput.value = hasAttachment || "";
+  if ((sender || dateFrom || dateTo || hasAttachment) && advancedPanel && advancedToggle) {
+    advancedPanel.hidden = false;
+    advancedToggle.setAttribute("aria-expanded", "true");
+  }
   return true;
 }
 
@@ -860,6 +887,20 @@ navDownButton?.addEventListener("click", () => {
 document.querySelector("#logout-button")?.addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST" });
   window.location.href = "/login";
+});
+
+advancedToggle?.addEventListener("click", () => {
+  const expanded = advancedToggle.getAttribute("aria-expanded") === "true";
+  advancedToggle.setAttribute("aria-expanded", String(!expanded));
+  if (advancedPanel) advancedPanel.hidden = expanded;
+});
+
+advancedReset?.addEventListener("click", () => {
+  if (fromInput) fromInput.value = "";
+  if (dateFromInput) dateFromInput.value = "";
+  if (dateToInput) dateToInput.value = "";
+  if (attachmentInput) attachmentInput.value = "";
+  if (queryInput.value.trim()) runSearch();
 });
 
 runSearch();
