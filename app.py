@@ -305,6 +305,21 @@ APP_TITLE = required_config_str("app", "title")
 
 
 app = FastAPI(title=APP_TITLE)
+
+
+@app.middleware("http")
+async def no_cache_headers(request: Request, call_next):
+    # Starlette's StaticFiles sets ETag/Last-Modified but no Cache-Control,
+    # so browsers fall back to heuristic caching and can keep serving an old
+    # JS/CSS/HTML bundle after a deploy. iOS Safari has no accessible
+    # hard-reload gesture, so a stale heuristic cache there can outlive any
+    # "reload" the user can actually perform. Force revalidation on every
+    # load instead; ETag/Last-Modified still make that a cheap 304.
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 VALID_SESSIONS: dict[str, float | None] = {}
