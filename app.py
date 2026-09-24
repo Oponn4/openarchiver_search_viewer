@@ -433,6 +433,24 @@ def get_settings() -> Settings:
 SETTINGS = get_settings()
 
 
+_QUOTE_CHARS = "\"“”„‟"
+
+
+def phrase_query(query: str) -> str | None:
+    """None unless the whole query is one quoted phrase ("be quite"), in which case
+    returns the inner text unquoted. Handles straight quotes and the curly variants iOS
+    autocorrect substitutes them with, on either side (open/close needn't match).
+    A single-word "quoted" query isn't treated as a phrase -- Meilisearch's phrase syntax
+    only means anything for 2+ words in a fixed order; for one word it's identical to a
+    plain search, so falling through to the normal (typo-tolerant) path is strictly better.
+    """
+    stripped = query.strip()
+    if len(stripped) < 2 or stripped[0] not in _QUOTE_CHARS or stripped[-1] not in _QUOTE_CHARS:
+        return None
+    inner = stripped[1:-1].strip()
+    return inner if inner and len(inner.split()) > 1 else None
+
+
 def quote_keywords(query: str) -> str:
     words = [word.strip().strip("\"'") for word in query.split()]
     return " ".join(f'"{word}"' for word in words if word)
@@ -443,7 +461,11 @@ def loose_keywords(query: str) -> str:
 
 
 def search_terms(query: str) -> list[str]:
-    return [word.strip().strip("\"'").lower() for word in query.split() if word.strip().strip("\"'")]
+    # Strips the same quote characters phrase_query() recognizes (straight and curly), so a
+    # phrase query's highlight terms don't carry a stray leading/trailing quote glyph that
+    # would never match anything in the rendered text and silently fail to highlight.
+    strip_chars = "\"'" + _QUOTE_CHARS
+    return [word.strip().strip(strip_chars).lower() for word in query.split() if word.strip().strip(strip_chars)]
 
 
 def timestamp_to_iso(timestamp: Any) -> str | None:
@@ -908,7 +930,17 @@ def search_emails(
     settings = SETTINGS
     limit = min(limit, settings.search_max_limit)
     exact = exact and settings.enable_exact_filter
-    keywords = quote_keywords(q) if exact else loose_keywords(q)
+
+    # A query that is itself one quoted phrase ("be quite") is sent to OpenArchiver's
+    # Meilisearch as a single phrase token, which only matches the words adjacent and in
+    # that exact order -- confirmed against the live index: "Rechnung Auftragsnummer" found
+    # 2, the reversed word order found 0. Takes priority over the exact-match checkbox,
+    # since a phrase is inherently more specific than per-word exact matching.
+    phrase = phrase_query(q)
+    if phrase:
+        keywords = f'"{phrase}"'
+    else:
+        keywords = quote_keywords(q) if exact else loose_keywords(q)
     terms = search_terms(q)
     if not keywords:
         raise HTTPException(status_code=400, detail=t("enterSearchTerm"))
