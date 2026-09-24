@@ -889,3 +889,307 @@ body.mail-page .mail-detail {
 body.mail-page .mail-html-frame {
   min-height: 320px;
 }
+
+/* Systemfarbe folgen (Christian: "Dark Mode wie im System"). Betrifft nur das eigene
+   Chrome (Liste, Kopfzeilen, Buttons, Formulare) -- der eigentliche Mailinhalt im
+   .mail-html-frame-iframe bleibt unangetastet: das ist fremdes HTML mit eigenem, oft
+   fest weissem Hintergrund, den man von aussen nicht sicher umfaerben kann, ohne
+   Text auf Text unlesbar zu machen. So machen es auch die meisten Mail-Apps -- die
+   App-Oberflaeche wird dunkel, die Mail selbst bleibt "Papier". */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    background: #000000;
+    color: #e5e7eb;
+  }
+
+  .mail-page {
+    background: #1c1c1e;
+  }
+
+  .search-pane,
+  .viewer-pane {
+    background: #1c1c1e;
+  }
+
+  .search-pane,
+  .app-title,
+  .toolbar,
+  .meta-row,
+  .viewer-header,
+  .detail-fields,
+  .attachment-panel,
+  .result-item,
+  .search-pane[style],
+  body.mobile-detail-open .search-pane {
+    border-color: #38383a;
+  }
+
+  .app-title {
+    background: linear-gradient(135deg, #1c1c1e 0%, #232326 100%);
+    color: #f2f2f7;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  }
+
+  .app-title span {
+    color: #f2f2f7;
+  }
+
+  .logout-button {
+    background: #1c1c1e;
+    border-color: #38383a;
+    color: #9a9aa2;
+  }
+
+  .logout-button:hover {
+    background: #2c2c2e;
+    color: #f87171;
+    border-color: #48484a;
+  }
+
+  .toolbar {
+    background: #1c1c1e;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+  }
+
+  .search-icon {
+    color: #8e8e93;
+  }
+
+  .search-input-wrapper input {
+    background: #2c2c2e;
+    border-color: #38383a;
+    color: #f2f2f7;
+  }
+
+  .search-input-wrapper input:focus {
+    background: #2c2c2e;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.2);
+  }
+
+  .search-input-wrapper input::placeholder {
+    color: #8e8e93;
+  }
+
+  .search-input-wrapper button {
+    background: linear-gradient(135deg, #3b82f6, #2563eb);
+  }
+
+  .search-input-wrapper button:hover {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  }
+
+  .sort-group {
+    background: #2c2c2e;
+  }
+
+  .sort-button {
+    color: #9a9aa2;
+  }
+
+  .sort-button:hover {
+    color: #f2f2f7;
+  }
+
+  .sort-button.active {
+    background: #1c1c1e;
+    color: #60a5fa;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  }
+
+  .exact-control {
+    color: #b3b3b8;
+  }
+
+  .exact-control:hover {
+    color: #f2f2f7;
+  }
+
+  .custom-checkbox {
+    background: #2c2c2e;
+    border-color: #48484a;
+  }
+
+  .exact-control input:checked + .custom-checkbox {
+    background: #3b82f6;
+    border-color: #3b82f6;
+  }
+
+  .limit-label,
+  .limit-bound {
+    color: #9a9aa2;
+  }
+
+  .limit-label output {
+    color: #f2f2f7;
+  }
+
+  .meta-row {
+    background: #232326;
+  }
+
+  .meta-left {
+    color: #9a9aa2;
+  }
+
+  .nav-button {
+    background: #1c1c1e;
+    color: #9a9aa2;
+    border-color: #38383a;
+  }
+
+  .nav-button:not(:disabled):hover {
+    background: #2c2c2e;
+    color: #60a5fa;
+    border-color: #48484a;
+  }
+
+  .nav-button:disabled {
+    background: #1c1c1e;
+    color: #48484a;
+    border-color: #2c2c2e;
+  }
+
+  .result-item {
+    border-color: #2c2c2e;
+    background: #1c1c1e;
+  }
+
+  .result-item:hover {
+    background: #232326;
+    box-shadow: inset 4px 0 0 #48484a;
+  }
+
+  .result-item.active {
+    background: rgba(59, 130, 246, 0.16);
+    box-shadow: inset 4px 0 0 #3b82f6;
+  }
+
+  .date {
+    color: #9a9aa2;
+  }
+
+  .sender,
+  .preview {
+    color: #9a9aa2;
+  }
+
+  .preview {
+    color: #86868c;
+  }
+
+  mark {
+    /* Bleibt bewusst dieselbe helle Gelbflaeche -- aber der Text darauf braucht eine
+       feste dunkle Farbe statt "inherit", sonst wird er im Dark Mode fast weiss auf
+       hellgelb und ist kaum noch lesbar. */
+    background: #fff1a8;
+    color: #1b1f24;
+  }
+
+  .viewer-header {
+    background: #1c1c1e;
+  }
+
+  #viewer-meta {
+    color: #9a9aa2;
+  }
+
+  .open-link {
+    border-color: #48484a;
+    color: #60a5fa;
+  }
+
+  .open-link[aria-disabled="true"] {
+    color: #6e6e73;
+  }
+
+  .mail-detail {
+    background: #1c1c1e;
+  }
+
+  .detail-fields,
+  .attachment-panel {
+    background: #232326;
+  }
+
+  .detail-label {
+    color: #9a9aa2;
+  }
+
+  .detail-value {
+    color: #e5e7eb;
+  }
+
+  .attachment-title {
+    color: #e5e7eb;
+  }
+
+  .attachment-button {
+    color: #c7c7cc;
+  }
+
+  .attachment-button:hover {
+    background: #2c2c2e;
+    border-color: #38383a;
+  }
+
+  .attachment-button.active {
+    background: rgba(59, 130, 246, 0.16);
+    color: #60a5fa;
+    border-color: rgba(59, 130, 246, 0.4);
+  }
+
+  .attachment-button::before {
+    color: #8e8e93;
+  }
+
+  .attachment-open {
+    background: #2c2c2e;
+    color: #9a9aa2;
+    border-color: #38383a;
+  }
+
+  .attachment-open:hover {
+    background: #38383a;
+    color: #60a5fa;
+    border-color: #48484a;
+  }
+
+  .attachment-download {
+    color: #9a9aa2;
+  }
+
+  .attachment-download-name {
+    color: #e5e7eb;
+  }
+
+  .attachment-download-link {
+    border-color: #3b82f6;
+    color: #60a5fa;
+  }
+
+  .empty-state,
+  .error-state {
+    color: #9a9aa2;
+  }
+
+  .error-state {
+    color: #f87171;
+  }
+
+  .mobile-back-button {
+    background: #1c1c1e;
+    border-color: #48484a;
+    color: #60a5fa;
+  }
+
+  /* .detail-body ist der Klartext-Fallback ohne HTML-Teil -- eigenes Markup, kein
+     fremdes Mail-HTML, darf also mitgehen. */
+  .detail-body {
+    color: #e5e7eb;
+  }
+
+  /* .mail-html-frame, .attachment-preview, .attachment-frame, .attachment-image bewusst
+     NICHT umgefaerbt -- siehe Kommentar oben am Media-Query (fremdes Mail-HTML). */
+}
