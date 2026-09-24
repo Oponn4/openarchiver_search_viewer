@@ -179,10 +179,17 @@ body {
 .filter-group {
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 10px 16px;
 }
 
+/* Drei Elemente (Exact-Toggle, Limit-Slider, Advanced-Knopf) passten bei 390px nicht mehr
+   in eine Zeile -- gemessen: Advanced lief bis x=424.7 raus, 35px ueber den Viewport.
+   flex-wrap statt weiter zu quetschen: der Knopf faellt bei Platzmangel in die naechste
+   Zeile, wie es .filters-container (der Elternflex) fuer genau diesen Fall schon macht. */
+
 .advanced-toggle {
+  flex-shrink: 0;
   height: 32px;
   padding: 0 12px;
   background: transparent;
@@ -193,6 +200,7 @@ body {
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
+  white-space: nowrap;
 }
 
 .advanced-toggle:hover {
@@ -211,6 +219,14 @@ body {
   align-items: end;
   padding: 12px 16px 4px;
   border-top: 1px dashed #cbd5e1;
+}
+
+/* [hidden] muss hier explizit gewinnen: eine eigene Regel mit "display" auf demselben
+   Element schlaegt sonst die Browser-Vorgabe [hidden]{display:none}, weil beide dieselbe
+   Spezifitaet haben (0,1,0) und die Autoren-Regel in der Kaskade spaeter kommt -- Panel
+   blieb dadurch immer offen, auch mit gesetztem hidden-Attribut. */
+.advanced-panel[hidden] {
+  display: none;
 }
 
 .advanced-field {
@@ -292,51 +308,33 @@ body {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
-.exact-control {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
+/* Toggle-Schaltflaeche statt Checkbox (Christians Wunsch: die Checkbox liess sich im
+   .filter-group-Flexlayout zusammenquetschen -- ein Button mit fester Mindestbreite und
+   flex-shrink:0 kann das strukturell nicht mehr). */
+.exact-toggle {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 14px;
+  background: #ffffff;
   color: #475569;
+  border: 2px solid #cbd5e1;
+  border-radius: 999px;
   font-size: 13px;
   font-weight: 600;
-  transition: color 0.2s;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
 }
 
-.exact-control:hover {
+.exact-toggle:hover {
+  border-color: #94a3b8;
   color: #0f172a;
 }
 
-.exact-control input {
-  display: none;
-}
-
-.custom-checkbox {
-  width: 18px;
-  height: 18px;
-  border: 2px solid #cbd5e1;
-  border-radius: 4px;
-  display: inline-block;
-  position: relative;
-  transition: all 0.2s;
-  background: #ffffff;
-}
-
-.exact-control input:checked+.custom-checkbox {
+.exact-toggle[aria-pressed="true"] {
   background: #2563eb;
   border-color: #2563eb;
-}
-
-.exact-control input:checked+.custom-checkbox::after {
-  content: "";
-  position: absolute;
-  left: 5px;
-  top: 2px;
-  width: 4px;
-  height: 8px;
-  border: solid white;
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
+  color: #ffffff;
 }
 
 .limit-control {
@@ -1123,22 +1121,21 @@ body.mail-page .mail-html-frame {
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   }
 
-  .exact-control {
+  .exact-toggle {
+    background: #2c2c2e;
+    border-color: #48484a;
     color: #b3b3b8;
   }
 
-  .exact-control:hover {
+  .exact-toggle:hover {
+    border-color: #6e6e73;
     color: #f2f2f7;
   }
 
-  .custom-checkbox {
-    background: #2c2c2e;
-    border-color: #48484a;
-  }
-
-  .exact-control input:checked + .custom-checkbox {
+  .exact-toggle[aria-pressed="true"] {
     background: #3b82f6;
     border-color: #3b82f6;
+    color: #ffffff;
   }
 
   .limit-label,

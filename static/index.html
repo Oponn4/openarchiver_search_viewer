@@ -47,12 +47,8 @@
               data-i18n="sortAsc">오래된순</button>
           </div>
           <div class="filter-group">
-            <label class="exact-control" title="단어가 정확히 일치하는 메일만 검색합니다."
-              data-i18n-attr="title:exactTitle">
-              <input id="exact-input" type="checkbox" />
-              <span class="custom-checkbox"></span>
-              <span class="exact-label" data-i18n="exact">완전일치</span>
-            </label>
+            <button id="exact-input" type="button" class="exact-toggle" aria-pressed="false"
+              title="단어가 정확히 일치하는 메일만 검색합니다." data-i18n-attr="title:exactTitle" data-i18n="exact">완전일치</button>
             <div class="limit-control" title="값을 늘릴 수록 검색어와 덜 일치하는 메일까지 나타납니다."
               data-i18n-attr="title:limitTitle">
               <div class="limit-header">

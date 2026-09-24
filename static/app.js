@@ -58,7 +58,7 @@ function avatarLetterAndColor(from) {
 }
 
 function isExactMode() {
-  return Boolean(exactInput?.checked);
+  return exactInput?.getAttribute("aria-pressed") === "true";
 }
 
 function searchHighlightTerms(query) {
@@ -807,7 +807,7 @@ function restoreStateFromUrl() {
   const q = params.get("q");
   if (q === null) return false;
   queryInput.value = q;
-  if (exactInput) exactInput.checked = params.get("exact") === "true";
+  if (exactInput) exactInput.setAttribute("aria-pressed", params.get("exact") === "true" ? "true" : "false");
   const limitParam = Number(params.get("limit"));
   if (Number.isFinite(limitParam) && limitParam > 0) {
     limitInput.value = String(limitParam);
@@ -887,6 +887,11 @@ navDownButton?.addEventListener("click", () => {
 document.querySelector("#logout-button")?.addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST" });
   window.location.href = "/login";
+});
+
+exactInput?.addEventListener("click", () => {
+  const pressed = exactInput.getAttribute("aria-pressed") === "true";
+  exactInput.setAttribute("aria-pressed", String(!pressed));
 });
 
 advancedToggle?.addEventListener("click", () => {
