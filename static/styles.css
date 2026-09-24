@@ -9,15 +9,31 @@
   box-sizing: border-box;
 }
 
+/* iOS Safari scrolls the whole document to reveal a focused input even when body has
+   overflow:hidden -- that scroll targets the layout viewport, which overflow:hidden alone
+   doesn't stop. Combined with 100vh (measured against the largest, address-bar-collapsed
+   viewport) the page can end up permanently offset once the keyboard closes, with nothing
+   left to scroll back through: tapping the From field, then no way back up (Christian,
+   2026-09-24). position:fixed + inset:0 removes the document from scrollable flow entirely,
+   which Safari's forced scroll-into-view can't act on the same way; height:100% (of a
+   viewport-pinned body) replaces the stale 100vh measurement. */
+html {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   margin: 0;
+  height: 100%;
   overflow: hidden;
+  position: fixed;
+  inset: 0;
 }
 
 .app-shell {
   display: grid;
   grid-template-columns: minmax(320px, 38vw) minmax(0, 1fr);
-  height: 100vh;
+  height: 100%;
   min-height: 560px;
   overflow: hidden;
 }
@@ -27,7 +43,7 @@ body {
 }
 
 .mail-view-shell {
-  height: 100vh;
+  height: 100%;
   min-height: 560px;
   overflow: hidden;
 }
@@ -257,24 +273,6 @@ body {
 .advanced-field select:focus {
   outline: none;
   border-color: #3b82f6;
-}
-
-.advanced-reset {
-  height: 34px;
-  padding: 0 10px;
-  align-self: end;
-  background: transparent;
-  color: #64748b;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.advanced-reset:hover {
-  background: #f1f5f9;
-  color: #ef4444;
 }
 
 .sort-group {
@@ -1112,16 +1110,6 @@ body.mail-page .mail-html-frame {
   .advanced-field input:focus,
   .advanced-field select:focus {
     border-color: #3b82f6;
-  }
-
-  .advanced-reset {
-    color: #9a9aa2;
-    border-color: #38383a;
-  }
-
-  .advanced-reset:hover {
-    background: #2c2c2e;
-    color: #f87171;
   }
 
   .sort-group {

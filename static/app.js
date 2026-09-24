@@ -7,7 +7,6 @@ const limitMaxValue = document.querySelector("#limit-max-value");
 const exactInput = document.querySelector("#exact-input");
 const advancedToggle = document.querySelector("#advanced-toggle");
 const advancedPanel = document.querySelector("#advanced-panel");
-const advancedReset = document.querySelector("#advanced-reset");
 const clearButton = document.querySelector("#clear-button");
 const fromInput = document.querySelector("#from-input");
 const dateFromInput = document.querySelector("#date-from-input");
@@ -904,14 +903,6 @@ advancedToggle?.addEventListener("click", () => {
   const expanded = advancedToggle.getAttribute("aria-expanded") === "true";
   advancedToggle.setAttribute("aria-expanded", String(!expanded));
   if (advancedPanel) advancedPanel.hidden = expanded;
-});
-
-advancedReset?.addEventListener("click", () => {
-  if (fromInput) fromInput.value = "";
-  if (dateFromInput) dateFromInput.value = "";
-  if (dateToInput) dateToInput.value = "";
-  if (attachmentInput) attachmentInput.value = "";
-  if (queryInput.value.trim()) runSearch();
 });
 
 clearButton?.addEventListener("click", () => {
