@@ -337,6 +337,27 @@ body {
   color: #ffffff;
 }
 
+.clear-button {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 12px;
+  background: transparent;
+  color: #64748b;
+  border: 1px solid #c8d1dc;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.clear-button:hover {
+  background: #fef2f2;
+  color: #ef4444;
+  border-color: #fca5a5;
+}
+
 .limit-control {
   display: flex;
   flex-direction: column;
@@ -1136,6 +1157,17 @@ body.mail-page .mail-html-frame {
     background: #3b82f6;
     border-color: #3b82f6;
     color: #ffffff;
+  }
+
+  .clear-button {
+    color: #9a9aa2;
+    border-color: #48484a;
+  }
+
+  .clear-button:hover {
+    background: #2c2c2e;
+    color: #f87171;
+    border-color: #6e6e73;
   }
 
   .limit-label,

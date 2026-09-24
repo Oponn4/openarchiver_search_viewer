@@ -8,6 +8,7 @@ const exactInput = document.querySelector("#exact-input");
 const advancedToggle = document.querySelector("#advanced-toggle");
 const advancedPanel = document.querySelector("#advanced-panel");
 const advancedReset = document.querySelector("#advanced-reset");
+const clearButton = document.querySelector("#clear-button");
 const fromInput = document.querySelector("#from-input");
 const dateFromInput = document.querySelector("#date-from-input");
 const dateToInput = document.querySelector("#date-to-input");
@@ -911,6 +912,20 @@ advancedReset?.addEventListener("click", () => {
   if (dateToInput) dateToInput.value = "";
   if (attachmentInput) attachmentInput.value = "";
   if (queryInput.value.trim()) runSearch();
+});
+
+clearButton?.addEventListener("click", () => {
+  queryInput.value = "";
+  if (fromInput) fromInput.value = "";
+  if (dateFromInput) dateFromInput.value = "";
+  if (dateToInput) dateToInput.value = "";
+  if (attachmentInput) attachmentInput.value = "";
+  exactInput?.setAttribute("aria-pressed", "false");
+  resultList.innerHTML = "";
+  resultSummary.textContent = translate("enterSearchTerm");
+  statusText.textContent = "";
+  history.pushState({}, "", location.pathname);
+  queryInput.focus();
 });
 
 runSearch();
