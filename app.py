@@ -957,7 +957,7 @@ def mail_view(request: Request, message_id: UUID) -> Response:
 
 @app.get("/api/search", dependencies=[Depends(verify_api_auth)])
 def search_emails(
-    q: str = Query(..., min_length=1),
+    q: str = Query(""),
     limit: int = Query(30, ge=MIN_SEARCH_LIMIT),
     sort: str = Query("relevance", pattern="^(relevance|asc|desc)$"),
     exact: bool = Query(False),
@@ -981,7 +981,12 @@ def search_emails(
     else:
         keywords = quote_keywords(q) if exact else loose_keywords(q)
     terms = search_terms(q)
-    if not keywords:
+    has_filter = bool(sender and sender.strip()) or bool(date_from) or bool(date_to) or has_attachment is not None
+    if not keywords and not has_filter:
+        # Outlook/eM Client allow a sender- or date-only browse with no search term at all --
+        # OpenArchiver's own API already accepts an empty `keywords` param fine (confirmed
+        # directly against it: from=sonja@... with keywords="" returned real hits). Only block
+        # the genuinely empty case where neither a term nor any filter was given.
         raise HTTPException(status_code=400, detail=t("enterSearchTerm"))
 
     params = {

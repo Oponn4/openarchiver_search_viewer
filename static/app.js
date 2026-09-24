@@ -698,12 +698,18 @@ function renderError(message) {
 async function runSearch() {
   const q = queryInput.value.trim();
   const limit = clampLimitInput();
+  const sender = (fromInput?.value || "").trim();
+  const hasFilter = Boolean(sender || dateFromInput?.value || dateToInput?.value || attachmentInput?.value);
 
-  if (!q) {
+  // Outlook/eM Client allow browsing by sender or date range alone, with no search term --
+  // only block the actually-empty case (no term, no filter). The backend accepts an empty
+  // `q` the same way now (confirmed OpenArchiver's own API returns real hits for an empty
+  // `keywords` param combined with `from`).
+  if (!q && !hasFilter) {
     resultSummary.textContent = translate("enterSearchTerm");
     return;
   }
-  saveSearchHistory(q);
+  if (q) saveSearchHistory(q);
 
   setLoading(true);
   resultSummary.textContent = "";
@@ -719,7 +725,6 @@ async function runSearch() {
     // Erweiterte Filter nur setzen, wenn ausgefuellt -- der leere String wuerde beim
     // Backend gegen das Datumsmuster ("^\d{4}-\d{2}-\d{2}$") scheitern; nicht mitgeschickt
     // bleibt der jeweilige FastAPI-Parameter auf seinem Default None.
-    const sender = (fromInput?.value || "").trim();
     if (sender) params.set("sender", sender);
     if (dateFromInput?.value) params.set("date_from", dateFromInput.value);
     if (dateToInput?.value) params.set("date_to", dateToInput.value);
