@@ -958,51 +958,128 @@ def mail_view(request: Request, message_id: UUID) -> Response:
 
 
 SENDER_SCAN_PAGE_SIZE = 100
-# OpenArchiver's own result estimate flattens out around 1000 for a broad query -- scanning
-# further than that would chase a number OpenArchiver itself doesn't give a precise count for
-# either. 10 pages keeps a domain-wide sender scan to at most 10 sequential requests.
-SENDER_SCAN_MAX_PAGES = 10
+# One broad, sender-unfiltered query to discover which distinct `from` addresses contain the
+# substring. Meilisearch itself caps any single query's reachable hits at roughly 1000
+# (confirmed directly: page 11 of a maximally broad query came back empty despite the archive
+# holding far more), so scanning further here wouldn't surface more of them anyway -- but an
+# automated sender reuses the exact same address on every message, so even a sample that
+# drastically undercounts a sender's total *mail* still reliably discovers that the *address*
+# exists (confirmed: a 2-hit sample for one real address was enough to discover it, before its
+# true total of 111 was found in phase two below).
+SENDER_DISCOVERY_MAX_PAGES = 10
+# Once an address is discovered, OpenArchiver's own `from` filter paginates it properly -- no
+# ceiling issue within one sender (confirmed: 111 messages for one real address, fully reachable
+# in 2 pages). Still bounded, in case one address genuinely has an enormous volume.
+SENDER_ADDRESS_MAX_PAGES = 10
+# How many distinct matching addresses to fully retrieve, so a too-generic substring (e.g. a
+# single letter) matching dozens of unrelated senders doesn't turn one search into dozens of
+# follow-up queries.
+SENDER_MAX_DISTINCT_ADDRESSES = 20
+
+
+def _fetch_search_page(
+    settings: Settings, session: requests.Session, headers: dict[str, str], params: dict[str, str]
+) -> dict[str, Any]:
+    try:
+        response = session.get(settings.search_url, params=params, headers=headers, timeout=30)
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        raise HTTPException(status_code=status_code, detail=t("searchOpenArchiverFailed")) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=t("openArchiverConnectionFailed", error=str(exc))) from exc
+    return response.json()
 
 
 def scan_for_sender(
     settings: Settings, base_params: dict[str, str], sender_needle: str
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Walk OpenArchiver's own paginated /search results and keep only the hits whose `from`
-    contains sender_needle (case-insensitive substring, so a bare domain like
-    "haushalt-kueche.de" matches every address at it, not just one exact one OpenArchiver's
-    own `from` filter would need spelled out in full). Returns (matching hits, scanned_all) --
-    scanned_all is False when SENDER_SCAN_MAX_PAGES was hit before OpenArchiver ran out of
-    pages, meaning the match count is a lower bound, not an exact total."""
+    """Find every hit whose `from` contains sender_needle (case-insensitive substring, so a
+    bare domain like "haushalt-kueche.de" matches every address at it, not just one exact
+    address OpenArchiver's own `from` filter would need spelled out in full).
+
+    Two phases, not a single big scan: a first attempt scanned one un-narrowed query page by
+    page and only ever saw whatever fell in Meilisearch's own ~1000-hit ceiling for that query
+    -- 2 of a real 111 total. A second attempt tried bisecting the date range to dodge that
+    ceiling, but the *un*-related mail in this archive is dense enough that almost every window,
+    however narrow, saturates too -- a depth-first bisection sank its whole request budget
+    subdividing one date half before its sibling was ever scanned (10 of 111 found), and a
+    breadth-first version spread the same budget thin across mostly-irrelevant windows instead
+    of drilling into the one that actually held this sender's mail (4 of 111). Date has nothing
+    to do with matching a sender, so narrowing by date was never going to reliably find it.
+
+    What actually filters by sender and paginates properly is OpenArchiver's own `from` filter
+    -- just only for one exact address at a time. So: discover which distinct addresses contain
+    sender_needle from one broad sample (phase one), then pull each discovered address's
+    complete mail through OpenArchiver's own exact filter (phase two), which was never subject
+    to the ceiling in the first place.
+
+    Returns (matching hits, exhaustive) -- exhaustive is False when the discovery sample was
+    itself capped (meaning a not-yet-seen address may exist) or more distinct addresses matched
+    than SENDER_MAX_DISTINCT_ADDRESSES allows through, meaning the result is a lower bound on
+    distinct senders, not a guaranteed-complete set."""
     session = openarchiver_session()
     headers = openarchiver_headers(settings)
-    matches: list[dict[str, Any]] = []
-    for page in range(1, SENDER_SCAN_MAX_PAGES + 1):
-        params = dict(base_params)
+
+    discovery_base = dict(base_params)
+    if not discovery_base.get("keywords") and not any(
+        k in discovery_base for k in ("dateFrom", "dateTo", "hasAttachments")
+    ):
+        # OpenArchiver refuses a request with neither keywords nor a filter. A pure
+        # sender-only browse has neither at this point -- `from` isn't in base_params (that's
+        # the whole point, see docstring), so give the discovery sample a filter that's true
+        # for the entire archive instead of forcing the user to also pick a date range.
+        discovery_base["dateFrom"] = "2000-01-01"
+
+    discovered: dict[str, str] = {}
+    discovery_capped = False
+    for page in range(1, SENDER_DISCOVERY_MAX_PAGES + 1):
+        params = dict(discovery_base)
         params["page"] = str(page)
         params["limit"] = str(SENDER_SCAN_PAGE_SIZE)
-        try:
-            response = session.get(settings.search_url, params=params, headers=headers, timeout=30)
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            status_code = exc.response.status_code if exc.response is not None else 502
-            raise HTTPException(status_code=status_code, detail=t("searchOpenArchiverFailed")) from exc
-        except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=t("openArchiverConnectionFailed", error=str(exc))) from exc
-
-        payload = response.json()
+        payload = _fetch_search_page(settings, session, headers, params)
         hits = payload.get("hits", [])
         if not isinstance(hits, list) or not hits:
-            return matches, True
-
+            break
         for hit in hits:
-            if isinstance(hit, dict) and sender_needle in str(hit.get("from", "")).lower():
-                matches.append(hit)
-
+            if not isinstance(hit, dict):
+                continue
+            from_addr = str(hit.get("from", ""))
+            if sender_needle in from_addr.lower():
+                discovered.setdefault(from_addr.lower(), from_addr)
         total_pages = payload.get("totalPages")
-        if (total_pages is not None and page >= total_pages) or len(hits) < SENDER_SCAN_PAGE_SIZE:
-            return matches, True
+        if len(hits) < SENDER_SCAN_PAGE_SIZE:
+            break
+        if total_pages is not None and page >= total_pages:
+            break
+        if page == SENDER_DISCOVERY_MAX_PAGES:
+            discovery_capped = True
 
-    return matches, False
+    addresses = list(discovered.values())
+    approx = discovery_capped or len(addresses) > SENDER_MAX_DISTINCT_ADDRESSES
+    addresses = addresses[:SENDER_MAX_DISTINCT_ADDRESSES]
+
+    matches: list[dict[str, Any]] = []
+    for address in addresses:
+        for page in range(1, SENDER_ADDRESS_MAX_PAGES + 1):
+            params = dict(base_params)
+            params["from"] = address
+            params["page"] = str(page)
+            params["limit"] = str(SENDER_SCAN_PAGE_SIZE)
+            payload = _fetch_search_page(settings, session, headers, params)
+            hits = payload.get("hits", [])
+            if not isinstance(hits, list) or not hits:
+                break
+            matches.extend(h for h in hits if isinstance(h, dict))
+            total_pages = payload.get("totalPages")
+            if len(hits) < SENDER_SCAN_PAGE_SIZE:
+                break
+            if total_pages is not None and page >= total_pages:
+                break
+            if page == SENDER_ADDRESS_MAX_PAGES:
+                approx = True
+
+    return matches, not approx
 
 
 @app.get("/api/search", dependencies=[Depends(verify_api_auth)])
@@ -1060,14 +1137,11 @@ def search_emails(
         # OpenArchiver's own `from` filter is exact-match only -- confirmed directly against
         # its API: from=haushalt-kueche.de (a bare domain) returns 0 hits, only the complete
         # address matches. Christian wants "everyone @haushalt-kueche.de", not one known
-        # address, so we never send `from` to OpenArchiver at all: instead we walk its own
-        # paginated results ourselves (still narrowed by whatever keywords/date/attachment
-        # filters are active) and substring-match the `from` field client-side.
-        if not keywords and not (date_from or date_to or has_attachment is not None):
-            # OpenArchiver refuses a request with neither keywords nor a filter -- a pure
-            # sender-domain browse has neither, so give it a filter that's true for the whole
-            # archive rather than force the user to also pick a date range.
-            base_params["dateFrom"] = "2000-01-01"
+        # address; scan_for_sender discovers the distinct matching addresses first, then pulls
+        # each one's complete mail through OpenArchiver's own exact filter (see its own
+        # docstring for why -- two earlier, discarded approaches are recorded there). Whatever
+        # keywords/date/attachment filters are already in base_params carry through unchanged,
+        # same as the non-sender path below.
         hits, scanned_all = scan_for_sender(settings, base_params, sender_needle)
         items = [normalize_hit(hit, terms) for hit in hits]
         if sort in {"asc", "desc"}:
