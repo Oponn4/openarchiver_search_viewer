@@ -957,6 +957,54 @@ def mail_view(request: Request, message_id: UUID) -> Response:
     return Response(content=content, media_type="text/html")
 
 
+SENDER_SCAN_PAGE_SIZE = 100
+# OpenArchiver's own result estimate flattens out around 1000 for a broad query -- scanning
+# further than that would chase a number OpenArchiver itself doesn't give a precise count for
+# either. 10 pages keeps a domain-wide sender scan to at most 10 sequential requests.
+SENDER_SCAN_MAX_PAGES = 10
+
+
+def scan_for_sender(
+    settings: Settings, base_params: dict[str, str], sender_needle: str
+) -> tuple[list[dict[str, Any]], bool]:
+    """Walk OpenArchiver's own paginated /search results and keep only the hits whose `from`
+    contains sender_needle (case-insensitive substring, so a bare domain like
+    "haushalt-kueche.de" matches every address at it, not just one exact one OpenArchiver's
+    own `from` filter would need spelled out in full). Returns (matching hits, scanned_all) --
+    scanned_all is False when SENDER_SCAN_MAX_PAGES was hit before OpenArchiver ran out of
+    pages, meaning the match count is a lower bound, not an exact total."""
+    session = openarchiver_session()
+    headers = openarchiver_headers(settings)
+    matches: list[dict[str, Any]] = []
+    for page in range(1, SENDER_SCAN_MAX_PAGES + 1):
+        params = dict(base_params)
+        params["page"] = str(page)
+        params["limit"] = str(SENDER_SCAN_PAGE_SIZE)
+        try:
+            response = session.get(settings.search_url, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else 502
+            raise HTTPException(status_code=status_code, detail=t("searchOpenArchiverFailed")) from exc
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=t("openArchiverConnectionFailed", error=str(exc))) from exc
+
+        payload = response.json()
+        hits = payload.get("hits", [])
+        if not isinstance(hits, list) or not hits:
+            return matches, True
+
+        for hit in hits:
+            if isinstance(hit, dict) and sender_needle in str(hit.get("from", "")).lower():
+                matches.append(hit)
+
+        total_pages = payload.get("totalPages")
+        if (total_pages is not None and page >= total_pages) or len(hits) < SENDER_SCAN_PAGE_SIZE:
+            return matches, True
+
+    return matches, False
+
+
 @app.get("/api/search", dependencies=[Depends(verify_api_auth)])
 def search_emails(
     q: str = Query(""),
@@ -991,60 +1039,92 @@ def search_emails(
         # the genuinely empty case where neither a term nor any filter was given.
         raise HTTPException(status_code=400, detail=t("enterSearchTerm"))
 
-    params = {
+    base_params = {
         "keywords": keywords,
-        "page": "1",
-        "limit": str(limit),
         "matchingStrategy": settings.search_matching_strategy,
     }
     # Erweiterte Filter (Outlook/eM-Client-Stil: Absender, Zeitraum, Anhang) -- reichen 1:1
     # an OpenArchivers eigene Parameter durch, die koennen das schon laenger, unsere UI
     # hat es bisher nur nie angeboten.
-    if sender and sender.strip():
-        params["from"] = sender.strip()
     if date_from:
-        params["dateFrom"] = date_from
+        base_params["dateFrom"] = date_from
     if date_to:
-        params["dateTo"] = date_to
+        base_params["dateTo"] = date_to
     if has_attachment is not None:
-        params["hasAttachments"] = "true" if has_attachment else "false"
+        base_params["hasAttachments"] = "true" if has_attachment else "false"
 
-    session = openarchiver_session()
+    sender_needle = sender.strip().lower() if sender and sender.strip() else ""
+    approx_total = False
 
-    try:
-        response = session.get(
-            settings.search_url,
-            params=params,
-            headers=openarchiver_headers(settings),
-            timeout=30,
-        )
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        status_code = exc.response.status_code if exc.response is not None else 502
-        raise HTTPException(status_code=status_code, detail=t("searchOpenArchiverFailed")) from exc
-    except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=t("openArchiverConnectionFailed", error=str(exc))) from exc
+    if sender_needle:
+        # OpenArchiver's own `from` filter is exact-match only -- confirmed directly against
+        # its API: from=haushalt-kueche.de (a bare domain) returns 0 hits, only the complete
+        # address matches. Christian wants "everyone @haushalt-kueche.de", not one known
+        # address, so we never send `from` to OpenArchiver at all: instead we walk its own
+        # paginated results ourselves (still narrowed by whatever keywords/date/attachment
+        # filters are active) and substring-match the `from` field client-side.
+        if not keywords and not (date_from or date_to or has_attachment is not None):
+            # OpenArchiver refuses a request with neither keywords nor a filter -- a pure
+            # sender-domain browse has neither, so give it a filter that's true for the whole
+            # archive rather than force the user to also pick a date range.
+            base_params["dateFrom"] = "2000-01-01"
+        hits, scanned_all = scan_for_sender(settings, base_params, sender_needle)
+        items = [normalize_hit(hit, terms) for hit in hits]
+        if sort in {"asc", "desc"}:
+            items.sort(key=timestamp_sort_key, reverse=(sort == "desc"))
+        approx_total = not scanned_all
+        total: Any = len(items) if scanned_all else f"{len(items)}+"
+        items = items[:limit]
+        response_extra = {
+            "total": total,
+            "page": 1,
+            "limit": limit,
+            "totalPages": None,
+            "processingTimeMs": None,
+        }
+    else:
+        params = dict(base_params)
+        params["page"] = "1"
+        params["limit"] = str(limit)
+        session = openarchiver_session()
+        try:
+            response = session.get(
+                settings.search_url,
+                params=params,
+                headers=openarchiver_headers(settings),
+                timeout=30,
+            )
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else 502
+            raise HTTPException(status_code=status_code, detail=t("searchOpenArchiverFailed")) from exc
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=t("openArchiverConnectionFailed", error=str(exc))) from exc
 
-    payload = response.json()
-    hits = payload.get("hits", [])
-    if not isinstance(hits, list):
-        raise HTTPException(status_code=502, detail=t("invalidSearchResponse"))
+        payload = response.json()
+        hits = payload.get("hits", [])
+        if not isinstance(hits, list):
+            raise HTTPException(status_code=502, detail=t("invalidSearchResponse"))
 
-    items = [normalize_hit(hit, terms) for hit in hits if isinstance(hit, dict)]
-    if sort in {"asc", "desc"}:
-        items.sort(key=timestamp_sort_key, reverse=(sort == "desc"))
+        items = [normalize_hit(hit, terms) for hit in hits if isinstance(hit, dict)]
+        if sort in {"asc", "desc"}:
+            items.sort(key=timestamp_sort_key, reverse=(sort == "desc"))
+        response_extra = {
+            "total": payload.get("total", len(items)),
+            "page": payload.get("page", 1),
+            "limit": payload.get("limit", limit),
+            "totalPages": payload.get("totalPages"),
+            "processingTimeMs": payload.get("processingTimeMs"),
+        }
 
     return {
         "items": items,
-        "total": payload.get("total", len(items)),
-        "page": payload.get("page", 1),
-        "limit": payload.get("limit", limit),
+        **response_extra,
         "maxLimit": settings.search_max_limit,
-        "totalPages": payload.get("totalPages"),
-        "processingTimeMs": payload.get("processingTimeMs"),
         "query": q,
         "keywords": keywords,
         "sort": sort,
+        "senderApprox": approx_total,
         "exact": exact,
     }
 
