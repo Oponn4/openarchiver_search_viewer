@@ -25,6 +25,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 
+# pdf.js ships ES modules (.mjs) and wasm decoders. Browsers refuse to run a module script
+# served with a non-JavaScript MIME type, and the python:slim image has no /etc/mime.types
+# to fall back on, so register both explicitly.
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("application/wasm", ".wasm")
+
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 CONFIG_PATH = ROOT / "config.toml"
@@ -134,6 +140,13 @@ I18N = {
         "attachmentPreview": "첨부파일 미리보기",
         "unsupportedPreview": "이 형식은 브라우저에서 바로 미리보기 어렵습니다.",
         "openOrDownload": "열기 또는 다운로드",
+        "openPdf": "PDF 열기",
+        "pdfViewTitle": "PDF 보기",
+        "back": "뒤로",
+        "share": "공유",
+        "download": "다운로드",
+        "pdfLoading": "PDF를 불러오는 중입니다.",
+        "pdfLoadFailed": "PDF를 불러올 수 없습니다.",
         "noBodyInSearchResult": "검색 결과에 본문 텍스트가 없습니다. 전체 메일은 새 창에서 열어 확인하세요.",
         "noPreviewBody": "검색 결과 미리보기 본문이 없습니다.",
         "noResults": "검색 결과가 없습니다.",
@@ -219,6 +232,13 @@ I18N = {
         "attachmentPreview": "Attachment preview",
         "unsupportedPreview": "This file type is difficult to preview directly in the browser.",
         "openOrDownload": "Open or download",
+        "openPdf": "Open PDF",
+        "pdfViewTitle": "PDF",
+        "back": "Back",
+        "share": "Share",
+        "download": "Download",
+        "pdfLoading": "Loading PDF.",
+        "pdfLoadFailed": "Could not load the PDF.",
         "noBodyInSearchResult": "No body text is available in the search result. Open the full mail in a new window.",
         "noPreviewBody": "No search result preview body is available.",
         "noResults": "No search results.",
@@ -851,6 +871,11 @@ def normalize_attachments(message_id: str, value: Any) -> list[dict[str, Any]]:
                 "mimeType": mime_type,
                 "sizeBytes": item.get("sizeBytes"),
                 "viewUrl": f"/api/mail/{message_id}/attachments/{attachment_id}",
+                "pageUrl": (
+                    f"/mail/{message_id}/attachments/{attachment_id}"
+                    if mime_type == "application/pdf"
+                    else None
+                ),
             }
         )
     return attachments
@@ -954,6 +979,18 @@ def mail_view(request: Request, message_id: UUID) -> Response:
     if not is_valid_auth_token(auth_token):
         return RedirectResponse(url="/login")
     content = render_static_template("mail.html", t("mailViewTitle"))
+    return Response(content=content, media_type="text/html")
+
+
+@app.get("/mail/{message_id}/attachments/{attachment_id}")
+def pdf_view(request: Request, message_id: UUID, attachment_id: str) -> Response:
+    # Own PDF page (pdf.js) instead of handing the raw PDF to the browser: in an iOS home-screen
+    # web app the native PDF viewer has no toolbar at all -- no back, no share, no download --
+    # and in an iframe iOS shows only the first page.
+    auth_token = request.cookies.get("auth_token")
+    if not is_valid_auth_token(auth_token):
+        return RedirectResponse(url="/login")
+    content = render_static_template("pdf.html", t("pdfViewTitle"))
     return Response(content=content, media_type="text/html")
 
 
@@ -1351,11 +1388,13 @@ def _cached_get_attachment_data(message_id: UUID, attachment_id: str) -> tuple[b
 
 
 @app.get("/api/mail/{message_id}/attachments/{attachment_id}", dependencies=[Depends(verify_api_auth)])
-def get_attachment(message_id: UUID, attachment_id: str) -> Response:
+def get_attachment(message_id: UUID, attachment_id: str, download: bool = False) -> Response:
     response_content, mime_type, filename = _cached_get_attachment_data(message_id, attachment_id)
     is_active_content = is_active_attachment(filename, mime_type)
     headers = {
-        "Content-Disposition": content_disposition(filename, "attachment" if is_active_content else "inline"),
+        "Content-Disposition": content_disposition(
+            filename, "attachment" if is_active_content or download else "inline"
+        ),
         "X-Content-Type-Options": "nosniff",
     }
     safe_mime_type = "application/octet-stream" if is_active_content else mime_type

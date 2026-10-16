@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="__APP_LANG__">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>__PAGE_TITLE__</title>
+    __APP_CONFIG_SCRIPT__
+    <link rel="stylesheet" href="/static/pdf.css" />
+  </head>
+  <body class="pdf-page">
+    <header class="pdf-toolbar">
+      <button id="pdf-back" class="pdf-button" type="button" data-i18n-attr="aria-label:back,title:back" aria-label="Back" title="Back">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+      </button>
+      <div id="pdf-title" class="pdf-title"></div>
+      <button id="pdf-share" class="pdf-button" type="button" hidden data-i18n-attr="aria-label:share,title:share" aria-label="Share" title="Share">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path><polyline points="16 6 12 2 8 6"></polyline><line x1="12" y1="2" x2="12" y2="15"></line></svg>
+      </button>
+      <a id="pdf-download" class="pdf-button" href="#" download data-i18n-attr="aria-label:download,title:download" aria-label="Download" title="Download">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+      </a>
+    </header>
+    <main id="pdf-pages" class="pdf-pages">
+      <div id="pdf-status" class="pdf-status" data-i18n="pdfLoading">Loading PDF.</div>
+    </main>
+    <script src="/static/i18n.js"></script>
+    <script type="module" src="/static/pdf_view.js"></script>
+  </body>
+</html>

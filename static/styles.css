@@ -1335,3 +1335,33 @@ body.mail-page .mail-html-frame {
   /* .mail-html-frame, .attachment-preview, .attachment-frame, .attachment-image bewusst
      NICHT umgefaerbt -- siehe Kommentar oben am Media-Query (fremdes Mail-HTML). */
 }
+/* PDF viewer layer over the search page (see openPdfOverlay in app.js). */
+.pdf-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  /* env() is 0 inside the iframe, so the layer itself keeps clear of notch and status bar. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+  background: #ffffff;
+}
+
+.pdf-overlay-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+}
+
+@media (prefers-color-scheme: dark) {
+  .pdf-overlay {
+    background: #1c1c1e;
+  }
+}
+
+/* Two attachment columns leave ~170px per row at 390px; next to the badge and the open button
+   the filename shrank to a single letter. One column on narrow screens. */
+@media (max-width: 760px) {
+  .attachment-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

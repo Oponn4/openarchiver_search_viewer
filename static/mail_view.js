@@ -82,7 +82,7 @@ function renderAttachmentPreview(container, attachment) {
     const frame = document.createElement("iframe");
     frame.className = "attachment-frame";
     frame.title = translate("attachmentPreview");
-    frame.src = attachment.viewUrl;
+    frame.src = attachment.pageUrl ? `${attachment.pageUrl}?embed=1` : attachment.viewUrl;
     container.appendChild(frame);
     return;
   }
@@ -148,10 +148,16 @@ function createAttachmentPanel(attachments) {
     });
     const openLink = document.createElement("a");
     openLink.className = "attachment-open";
-    openLink.href = attachment.viewUrl;
-    openLink.target = "_blank";
-    openLink.rel = "noreferrer";
-    openLink.textContent = translate("openInNewWindow");
+    if (attachment.pageUrl) {
+      // Same window, so the PDF page's back button returns here.
+      openLink.href = attachment.pageUrl;
+      openLink.textContent = translate("openPdf");
+    } else {
+      openLink.href = attachment.viewUrl;
+      openLink.target = "_blank";
+      openLink.rel = "noreferrer";
+      openLink.textContent = translate("openInNewWindow");
+    }
     const row = document.createElement("div");
     row.className = "attachment-row";
     row.append(button, openLink);

@@ -523,10 +523,22 @@ function createAttachmentPanel(attachments) {
 
     const openLink = document.createElement("a");
     openLink.className = "attachment-open";
-    openLink.href = attachment.viewUrl;
-    openLink.target = "_blank";
-    openLink.rel = "noreferrer";
-    openLink.textContent = translate("openInNewWindow");
+    if (attachment.pageUrl) {
+      // PDFs open in our own viewer as a layer over the search page, so back returns to the
+      // same mail with results intact -- a new tab or the raw PDF has no way back in an iOS
+      // home-screen web app.
+      openLink.href = attachment.pageUrl;
+      openLink.textContent = translate("openPdf");
+      openLink.addEventListener("click", (event) => {
+        event.preventDefault();
+        openPdfOverlay(attachment.pageUrl);
+      });
+    } else {
+      openLink.href = attachment.viewUrl;
+      openLink.target = "_blank";
+      openLink.rel = "noreferrer";
+      openLink.textContent = translate("openInNewWindow");
+    }
 
     const row = document.createElement("div");
     row.className = "attachment-row";
@@ -579,7 +591,10 @@ function renderAttachmentPreview(container, attachment) {
     const frame = document.createElement("iframe");
     frame.className = "attachment-frame";
     frame.title = translate("attachmentPreview");
-    frame.src = isPdfAttachment(attachment) ? pdfPreviewUrl(attachment.viewUrl) : attachment.viewUrl;
+    // PDFs go through pdf.js: iOS renders only the first page of a PDF inside an iframe.
+    frame.src = attachment.pageUrl
+      ? `${attachment.pageUrl}?embed=1`
+      : isPdfAttachment(attachment) ? pdfPreviewUrl(attachment.viewUrl) : attachment.viewUrl;
     container.appendChild(frame);
     return;
   }
@@ -841,7 +856,40 @@ function restoreStateFromUrl() {
   return true;
 }
 
+let pdfOverlay = null;
+
+function openPdfOverlay(pageUrl) {
+  closePdfOverlay();
+  pdfOverlay = document.createElement("div");
+  pdfOverlay.className = "pdf-overlay";
+  const frame = document.createElement("iframe");
+  frame.className = "pdf-overlay-frame";
+  frame.title = translate("pdfViewTitle");
+  frame.allow = "web-share";
+  frame.src = `${pageUrl}?overlay=1`;
+  pdfOverlay.appendChild(frame);
+  document.body.appendChild(pdfOverlay);
+  // Own history entry so the iOS edge-swipe (and the browser back button) closes the layer
+  // instead of leaving the search page.
+  history.pushState({ ...(history.state || {}), pdfOverlay: true }, "", location.href);
+}
+
+function closePdfOverlay() {
+  if (!pdfOverlay) return false;
+  pdfOverlay.remove();
+  pdfOverlay = null;
+  return true;
+}
+
+window.addEventListener("message", (event) => {
+  if (event.origin !== location.origin || event.data?.type !== "pdf-viewer-close") return;
+  if (!pdfOverlay || event.source !== pdfOverlay.querySelector("iframe")?.contentWindow) return;
+  // Goes through popstate below, which removes the layer and drops the extra history entry.
+  history.back();
+});
+
 window.addEventListener("popstate", () => {
+  if (closePdfOverlay()) return;
   restoreStateFromUrl();
   runSearch();
 });

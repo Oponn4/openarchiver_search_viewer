@@ -1,0 +1,122 @@
+/* Own stylesheet on purpose: styles.css pins body (position:fixed, overflow:hidden) for the
+   search layout, which would leave nothing to scroll here. */
+:root {
+  color-scheme: light dark;
+  font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --bar-bg: #ffffff;
+  --bar-border: #d8dee6;
+  --bar-fg: #1b1f24;
+  --accent: #1e4fd7;
+  --page-bg: #e9edf2;
+  --muted: #4c5968;
+  --error: #b42318;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bar-bg: #1c1c1e;
+    --bar-border: #38383a;
+    --bar-fg: #e5e7eb;
+    --accent: #60a5fa;
+    --page-bg: #000000;
+    --muted: #9a9aa2;
+    --error: #f87171;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--page-bg);
+}
+
+.pdf-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Home-screen web apps draw under the status bar (viewport-fit=cover). */
+  padding: calc(8px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right)) 8px
+    calc(12px + env(safe-area-inset-left));
+  background: var(--bar-bg);
+  border-bottom: 1px solid var(--bar-border);
+  color: var(--bar-fg);
+}
+
+.pdf-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.pdf-button {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.pdf-button[hidden] {
+  display: none;
+}
+
+.pdf-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 12px calc(8px + env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom))
+    calc(8px + env(safe-area-inset-left));
+}
+
+.pdf-page-box {
+  position: relative;
+  width: 100%;
+  max-width: 1000px;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+}
+
+.pdf-page-box canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.pdf-status {
+  padding: 32px 16px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.pdf-status.error {
+  color: var(--error);
+}
+
+/* Inline preview inside the mail view: no toolbar, the surrounding panel has its own actions. */
+.embed .pdf-toolbar {
+  display: none;
+}
+
+.embed .pdf-pages {
+  padding: 8px;
+  gap: 8px;
+}
