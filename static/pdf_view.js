@@ -85,7 +85,9 @@ function setupShare(blob, filename) {
   shareButton.hidden = false;
   shareButton.addEventListener("click", async () => {
     try {
-      await navigator.share({ files: [file], title: filename });
+      // Files only: iOS turns title/text into a separate plain-text item, which share targets
+      // like Paperless then store as a second document next to the PDF.
+      await navigator.share({ files: [file] });
     } catch (error) {
       if (error.name !== "AbortError") {
         console.error("Share failed:", error);
