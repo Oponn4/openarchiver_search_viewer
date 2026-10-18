@@ -1065,14 +1065,13 @@ def scan_for_sender(
     headers = openarchiver_headers(settings)
 
     discovery_base = dict(base_params)
-    if not discovery_base.get("keywords") and not any(
-        k in discovery_base for k in ("dateFrom", "dateTo", "hasAttachments")
-    ):
-        # OpenArchiver refuses a request with neither keywords nor a filter. A pure
-        # sender-only browse has neither at this point -- `from` isn't in base_params (that's
-        # the whole point, see docstring), so give the discovery sample a filter that's true
-        # for the entire archive instead of forcing the user to also pick a date range.
-        discovery_base["dateFrom"] = "2000-01-01"
+    if not discovery_base.get("keywords"):
+        # Without a search term the discovery sample is just the first pages of the whole
+        # archive, and a sender outside them is never seen: measured on 2026-10-18 with about
+        # 150k mails, "netcup.de" found 0 of 52 and "haushalt-kueche.de" 0 of 152, both reported
+        # as complete. The sender's own words are indexed in `from`, so searching for them puts
+        # that sender's mail into the sample (52 and 152 found, same as an exact-address scan).
+        discovery_base["keywords"] = sender_needle
 
     discovered: dict[str, str] = {}
     discovery_capped = False
