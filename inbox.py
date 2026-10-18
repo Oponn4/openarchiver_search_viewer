@@ -45,9 +45,15 @@ TAG_LENGTH = 16
 IMAP_TIMEOUT_SECONDS = 20
 HEADER_FIELDS = "FROM TO SUBJECT DATE MESSAGE-ID"
 MAX_LIMIT = 200
-# Opening a mail and then its attachment would fetch the whole message twice; keep a few around.
-RAW_CACHE_SECONDS = 300
-RAW_CACHE_ENTRIES = 20
+# Raw messages never change under their id (the id carries UIDVALIDITY), so they can be kept a
+# while. After every inbox fetch the newest few per account are fetched ahead, so opening a mail
+# is answered from memory instead of a fresh IMAP login (measured 0.5-1.5 s before).
+RAW_CACHE_SECONDS = 1800
+RAW_CACHE_ENTRIES = 300
+PREFETCH_PER_ACCOUNT = int(os.environ.get("INBOX_PREFETCH_PER_ACCOUNT", "20"))
+PREFETCH_MAX_BYTES = 5_000_000
+# Credentials change rarely; decrypting all of them for every opened mail cost 0.23 s.
+ACCOUNTS_CACHE_SECONDS = 60
 # A slow account must not hold the whole inbox back: answer after this many seconds with the
 # accounts that are done, and serve the others from their last result while they finish.
 INBOX_DEADLINE_SECONDS = float(os.environ.get("INBOX_DEADLINE_SECONDS", "4"))
@@ -139,8 +145,23 @@ def load_accounts() -> list[Account | GraphAccount]:
     return accounts
 
 
+_ACCOUNTS_LOCK = threading.Lock()
+_ACCOUNTS: tuple[float, list[Account | GraphAccount]] | None = None
+
+
+def cached_accounts() -> list[Account | GraphAccount]:
+    global _ACCOUNTS
+    with _ACCOUNTS_LOCK:
+        if _ACCOUNTS and time.time() - _ACCOUNTS[0] < ACCOUNTS_CACHE_SECONDS:
+            return _ACCOUNTS[1]
+    accounts = load_accounts()
+    with _ACCOUNTS_LOCK:
+        _ACCOUNTS = (time.time(), accounts)
+    return accounts
+
+
 def account_by_id(account_id: str) -> Account | GraphAccount:
-    for account in load_accounts():
+    for account in cached_accounts():
         if account.id == account_id:
             return account
     raise HTTPException(status_code=404, detail="Unknown account")
@@ -318,11 +339,14 @@ def _start_fetch(account: Account, limit: int) -> Future:
             fetch = inbox_m365.fetch_inbox if isinstance(account, GraphAccount) else fetch_inbox
             future = _POOL.submit(fetch, account, limit)
 
-            def done(finished: Future, account_id: str = account.id) -> None:
+            def done(finished: Future, account_id: str = account.id, source: Account | GraphAccount = account) -> None:
                 with _LOCK:
                     _INFLIGHT.pop(account_id, None)
                     if finished.exception() is None:
                         _CACHE[account_id] = (time.time(), finished.result())
+                if finished.exception() is None:
+                    newest = sorted(finished.result()["messages"], key=lambda m: m.get("date") or "", reverse=True)
+                    _PREFETCH_POOL.submit(_prefetch, source, [m["id"] for m in newest[:PREFETCH_PER_ACCOUNT]])
 
             future.add_done_callback(done)
             _INFLIGHT[account.id] = future
@@ -484,6 +508,61 @@ def inbox_action(item_id: str, action: str) -> dict[str, Any]:
 
 _RAW_LOCK = threading.Lock()
 _RAW_CACHE: dict[str, tuple[float, bytes]] = {}
+# Separate and small, so prefetching never delays an inbox fetch.
+_PREFETCH_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch")
+
+
+def _store_raw(item_id: str, payload: bytes) -> None:
+    with _RAW_LOCK:
+        _RAW_CACHE[item_id] = (time.time(), payload)
+        for stale in sorted(_RAW_CACHE, key=lambda key: _RAW_CACHE[key][0])[:-RAW_CACHE_ENTRIES]:
+            del _RAW_CACHE[stale]
+
+
+def _is_cached(item_id: str) -> bool:
+    with _RAW_LOCK:
+        cached = _RAW_CACHE.get(item_id)
+    return bool(cached) and time.time() - cached[0] < RAW_CACHE_SECONDS
+
+
+def _prefetch(account: Account | GraphAccount, item_ids: list[str]) -> None:
+    missing = [item_id for item_id in item_ids if not _is_cached(item_id)]
+    if not missing:
+        return
+    try:
+        if isinstance(account, GraphAccount):
+            for item_id in missing:
+                payload = inbox_m365.raw_message(account, inbox_m365.decode_id(item_id.split(":")[2]))
+                if len(payload) <= PREFETCH_MAX_BYTES:
+                    _store_raw(item_id, payload)
+            return
+        uidvalidity = missing[0].split(":")[1]
+        uids = {item_id.split(":")[2]: item_id for item_id in missing if item_id.split(":")[1] == uidvalidity}
+        with imap_connection(account) as conn:
+            status, _ = conn.select("INBOX", readonly=True)
+            if status != "OK" or _uidvalidity(conn) != uidvalidity:
+                return
+            # Sizes first, so one huge attachment mail is not pulled ahead.
+            status, data = conn.uid("FETCH", ",".join(uids), "(RFC822.SIZE)")
+            small = [
+                match.group(1).decode()
+                for item in data or []
+                if isinstance(item, bytes)
+                and (match := re.search(rb"UID (\d+)", item))
+                and (size := re.search(rb"RFC822\.SIZE (\d+)", item))
+                and int(size.group(1)) <= PREFETCH_MAX_BYTES
+            ]
+            if not small:
+                return
+            status, data = conn.uid("FETCH", ",".join(small), "(BODY.PEEK[])")
+        for item in data or []:
+            if isinstance(item, tuple) and len(item) > 1 and (match := re.search(rb"UID (\d+)", item[0])):
+                item_id = uids.get(match.group(1).decode())
+                if item_id:
+                    _store_raw(item_id, item[1])
+    except Exception:
+        # Best effort: a failed prefetch only means the mail is fetched when opened.
+        pass
 
 
 def _fetch_raw(item_id: str) -> tuple[Account | GraphAccount, bytes]:
@@ -520,10 +599,7 @@ def _raw(item_id: str) -> tuple[Account | GraphAccount, bytes]:
     if cached and now - cached[0] < RAW_CACHE_SECONDS:
         return account_by_id(item_id.split(":", 1)[0]), cached[1]
     account, payload = _fetch_raw(item_id)
-    with _RAW_LOCK:
-        _RAW_CACHE[item_id] = (now, payload)
-        for stale in sorted(_RAW_CACHE, key=lambda key: _RAW_CACHE[key][0])[:-RAW_CACHE_ENTRIES]:
-            del _RAW_CACHE[stale]
+    _store_raw(item_id, payload)
     return account, payload
 
 
