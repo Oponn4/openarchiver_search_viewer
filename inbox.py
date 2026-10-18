@@ -5,6 +5,9 @@ The inbox therefore talks to the real mailboxes over IMAP. The account credentia
 twice; they are read from Open Archiver's own database and decrypted with its ENCRYPTION_KEY, the
 same way its CryptoService does (scrypt-derived key, AES-256-GCM, hex of salt|iv|tag|ciphertext).
 That ties this module to Open Archiver internals, so re-check it after every Open Archiver update.
+
+Microsoft 365 mailboxes (Open Archiver provider "oauth_mailbox") go over Graph instead, with
+Apport's own app registration and token; see inbox_m365.
 """
 
 from __future__ import annotations
@@ -30,6 +33,9 @@ from typing import Any, Iterator
 import psycopg
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import APIRouter, HTTPException, Query
+
+import inbox_m365
+from inbox_m365 import GraphAccount
 
 SALT_LENGTH = 64
 IV_LENGTH = 16
@@ -90,7 +96,7 @@ def enabled_account_names() -> set[str] | None:
     return {name.strip().lower() for name in raw.split(",") if name.strip()}
 
 
-def load_accounts() -> list[Account]:
+def load_accounts() -> list[Account | GraphAccount]:
     url = os.environ.get("OA_DATABASE_URL", "")
     if not url:
         raise HTTPException(status_code=500, detail="OA_DATABASE_URL is not set")
@@ -98,12 +104,17 @@ def load_accounts() -> list[Account]:
     wanted = enabled_account_names()
     with psycopg.connect(url, connect_timeout=5) as conn:
         rows = conn.execute(
-            "select id, name, credentials from ingestion_sources "
-            "where provider = 'generic_imap' and status <> 'paused' order by name"
+            "select id, name, provider, credentials from ingestion_sources "
+            "where provider in ('generic_imap', 'oauth_mailbox') and status <> 'paused' order by name"
         ).fetchall()
-    accounts = []
-    for source_id, name, credentials in rows:
+    accounts: list[Account | GraphAccount] = []
+    for source_id, name, provider, credentials in rows:
         if wanted is not None and name.lower() not in wanted:
+            continue
+        if provider == "oauth_mailbox":
+            # Only the account's identity comes from Open Archiver, never its token.
+            if os.environ.get("APPORT_M365_CLIENT_ID"):
+                accounts.append(GraphAccount(id=str(source_id), name=name))
             continue
         config = decrypt_oa(credentials, master_key)
         accounts.append(
@@ -123,7 +134,7 @@ def load_accounts() -> list[Account]:
     return accounts
 
 
-def account_by_id(account_id: str) -> Account:
+def account_by_id(account_id: str) -> Account | GraphAccount:
     for account in load_accounts():
         if account.id == account_id:
             return account
@@ -299,7 +310,8 @@ def _start_fetch(account: Account, limit: int) -> Future:
     with _LOCK:
         future = _INFLIGHT.get(account.id)
         if future is None:
-            future = _POOL.submit(fetch_inbox, account, limit)
+            fetch = inbox_m365.fetch_inbox if isinstance(account, GraphAccount) else fetch_inbox
+            future = _POOL.submit(fetch, account, limit)
 
             def done(finished: Future, account_id: str = account.id) -> None:
                 with _LOCK:
@@ -426,8 +438,21 @@ ACTIONS = {"archive", "delete", "read", "unread"}
 def inbox_action(item_id: str, action: str) -> dict[str, Any]:
     if action not in ACTIONS:
         raise HTTPException(status_code=404, detail="Unknown action")
+    if item_id.count(":") == 2 and item_id.split(":")[1] == "graph":
+        account_id, _, encoded = item_id.split(":")
+        account = account_by_id(account_id)
+        if not isinstance(account, GraphAccount):
+            raise HTTPException(status_code=400, detail="Malformed message id")
+        result = inbox_m365.act(account, inbox_m365.decode_id(encoded), action)
+        if action in ("read", "unread"):
+            _set_cached_seen(item_id, action == "read")
+        else:
+            _forget_cached(item_id)
+        return result
     account_id, uidvalidity, uid = _split_item_id(item_id)
     account = account_by_id(account_id)
+    if isinstance(account, GraphAccount):
+        raise HTTPException(status_code=400, detail="Malformed message id")
     with imap_connection(account) as conn:
         status, data = conn.select("INBOX")
         if status != "OK":
@@ -450,3 +475,21 @@ def inbox_action(item_id: str, action: str) -> dict[str, Any]:
         _move(conn, uid, target)
         _forget_cached(item_id)
         return {"ok": True, "moved_to": target}
+
+
+def _graph_account(account_id: str) -> GraphAccount:
+    account = account_by_id(account_id)
+    if not isinstance(account, GraphAccount):
+        raise HTTPException(status_code=404, detail="Not a Microsoft 365 account")
+    return account
+
+
+@router.post("/api/inbox/accounts/{account_id}/login")
+def m365_login(account_id: str) -> dict[str, Any]:
+    """Start the device-code sign-in; the caller shows user_code and verification_uri."""
+    return inbox_m365.start_login(_graph_account(account_id))
+
+
+@router.get("/api/inbox/accounts/{account_id}/login")
+def m365_login_status(account_id: str) -> dict[str, Any]:
+    return inbox_m365.login_status(_graph_account(account_id))
