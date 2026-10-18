@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import imaplib
+import importlib
 import json
 import os
 import re
@@ -26,13 +27,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email import policy
-from email.parser import BytesHeaderParser
+from email.parser import BytesHeaderParser, BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any, Iterator
 
 import psycopg
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 
 import inbox_m365
 from inbox_m365 import GraphAccount
@@ -43,6 +45,9 @@ TAG_LENGTH = 16
 IMAP_TIMEOUT_SECONDS = 20
 HEADER_FIELDS = "FROM TO SUBJECT DATE MESSAGE-ID"
 MAX_LIMIT = 200
+# Opening a mail and then its attachment would fetch the whole message twice; keep a few around.
+RAW_CACHE_SECONDS = 300
+RAW_CACHE_ENTRIES = 20
 # A slow account must not hold the whole inbox back: answer after this many seconds with the
 # accounts that are done, and serve the others from their last result while they finish.
 INBOX_DEADLINE_SECONDS = float(os.environ.get("INBOX_DEADLINE_SECONDS", "4"))
@@ -475,6 +480,144 @@ def inbox_action(item_id: str, action: str) -> dict[str, Any]:
         _move(conn, uid, target)
         _forget_cached(item_id)
         return {"ok": True, "moved_to": target}
+
+
+_RAW_LOCK = threading.Lock()
+_RAW_CACHE: dict[str, tuple[float, bytes]] = {}
+
+
+def _fetch_raw(item_id: str) -> tuple[Account | GraphAccount, bytes]:
+    if item_id.count(":") == 2 and item_id.split(":")[1] == "graph":
+        account_id, _, encoded = item_id.split(":")
+        account = account_by_id(account_id)
+        if not isinstance(account, GraphAccount):
+            raise HTTPException(status_code=400, detail="Malformed message id")
+        return account, inbox_m365.raw_message(account, inbox_m365.decode_id(encoded))
+    account_id, uidvalidity, uid = _split_item_id(item_id)
+    account = account_by_id(account_id)
+    if isinstance(account, GraphAccount):
+        raise HTTPException(status_code=400, detail="Malformed message id")
+    with imap_connection(account) as conn:
+        # Read-only and BODY.PEEK: opening a mail must not mark it read; the app does that on purpose.
+        status, data = conn.select("INBOX", readonly=True)
+        if status != "OK":
+            raise HTTPException(status_code=502, detail=f"SELECT INBOX failed: {data}")
+        if _uidvalidity(conn) != uidvalidity:
+            raise HTTPException(status_code=409, detail="Mailbox changed, reload the inbox")
+        status, data = conn.uid("FETCH", uid, "(BODY.PEEK[])")
+    if status != "OK":
+        raise HTTPException(status_code=502, detail=f"FETCH failed: {data}")
+    payload = next((item[1] for item in data or [] if isinstance(item, tuple) and len(item) > 1), None)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Message is no longer in the inbox")
+    return account, payload
+
+
+def _raw(item_id: str) -> tuple[Account | GraphAccount, bytes]:
+    now = time.time()
+    with _RAW_LOCK:
+        cached = _RAW_CACHE.get(item_id)
+    if cached and now - cached[0] < RAW_CACHE_SECONDS:
+        return account_by_id(item_id.split(":", 1)[0]), cached[1]
+    account, payload = _fetch_raw(item_id)
+    with _RAW_LOCK:
+        _RAW_CACHE[item_id] = (now, payload)
+        for stale in sorted(_RAW_CACHE, key=lambda key: _RAW_CACHE[key][0])[:-RAW_CACHE_ENTRIES]:
+            del _RAW_CACHE[stale]
+    return account, payload
+
+
+def _attachment_parts(message: Any) -> list[Any]:
+    parts = []
+    for part in message.walk():
+        if part.is_multipart():
+            continue
+        filename = part.get_filename()
+        disposition = part.get_content_disposition()
+        # Inline images with a Content-ID are already embedded in the HTML body.
+        if disposition != "attachment" and (not filename or part.get("Content-ID")):
+            continue
+        parts.append(part)
+    return parts
+
+
+def _viewer() -> Any:
+    # app.py imports this module; import it back lazily to reuse its MIME helpers.
+    return importlib.import_module("app")
+
+
+@router.get("/api/inbox/{item_id}/message")
+def inbox_message(item_id: str) -> dict[str, Any]:
+    account, payload = _raw(item_id)
+    viewer = _viewer()
+    message = BytesParser(policy=policy.default).parsebytes(payload)
+    content = viewer.extract_message_content(message)
+    attachments = []
+    for index, part in enumerate(_attachment_parts(message)):
+        data = part.get_payload(decode=True) or b""
+        filename = part.get_filename() or f"Anhang {index + 1}"
+        attachments.append(
+            {
+                "id": str(index),
+                "filename": filename,
+                "mimeType": viewer.normalized_mime_type(filename, part.get_content_type(), data),
+                "sizeBytes": len(data),
+                "viewUrl": f"/api/inbox/{item_id}/attachments/{index}",
+            }
+        )
+    timestamp = None
+    try:
+        if message.get("Date"):
+            parsed = parsedate_to_datetime(str(message["Date"]))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            timestamp = int(parsed.timestamp() * 1000)
+    except (TypeError, ValueError):
+        timestamp = None
+
+    def addresses(header: str) -> list[str]:
+        return [
+            f"{name} <{address}>" if name else address
+            for name, address in getaddresses([str(value) for value in message.get_all(header, [])])
+            if address or name
+        ]
+
+    sender = addresses("From")
+    return {
+        "item": {
+            "id": item_id,
+            "userEmail": account.name,
+            "from": sender[0] if sender else "",
+            "to": addresses("To"),
+            "cc": addresses("Cc"),
+            "subject": str(message.get("Subject", "")).replace("\x00", ""),
+            "body": content["text"],
+            "bodyHtml": content["html"],
+            "attachments": attachments,
+            "attachmentCount": len(attachments),
+            "timestamp": timestamp,
+            "messageIdHeader": str(message.get("Message-ID", "")).strip(),
+        }
+    }
+
+
+@router.get("/api/inbox/{item_id}/attachments/{index}")
+def inbox_attachment(item_id: str, index: int, download: bool = False) -> Response:
+    _, payload = _raw(item_id)
+    viewer = _viewer()
+    parts = _attachment_parts(BytesParser(policy=policy.default).parsebytes(payload))
+    if not 0 <= index < len(parts):
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    part = parts[index]
+    data = part.get_payload(decode=True) or b""
+    filename = (part.get_filename() or f"Anhang {index + 1}").replace('"', "'")
+    mime_type = viewer.normalized_mime_type(filename, part.get_content_type(), data)
+    active = viewer.is_active_attachment(filename, mime_type)
+    headers = {
+        "Content-Disposition": viewer.content_disposition(filename, "attachment" if active or download else "inline"),
+        "X-Content-Type-Options": "nosniff",
+    }
+    return Response(content=data, media_type="application/octet-stream" if active else mime_type, headers=headers)
 
 
 def _graph_account(account_id: str) -> GraphAccount:

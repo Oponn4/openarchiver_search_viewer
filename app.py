@@ -695,7 +695,11 @@ def extract_raw_content(raw: Any) -> dict[str, str]:
     message = parsed_raw_message(raw)
     if message is None:
         return {"text": "", "html": ""}
+    return extract_message_content(message)
 
+
+def extract_message_content(message: Any) -> dict[str, str]:
+    """Text and sanitized HTML of a parsed message; inline cid: images become data: URLs."""
     plain_parts: list[str] = []
     html_parts: list[str] = []
     cid_images: dict[str, str] = {}

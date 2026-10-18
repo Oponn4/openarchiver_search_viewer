@@ -258,6 +258,19 @@ def fetch_inbox(account: GraphAccount, limit: int) -> dict[str, Any]:
     }
 
 
+def raw_message(account: GraphAccount, graph_id: str) -> bytes:
+    """The message as MIME, the same bytes an IMAP server would hand out."""
+    try:
+        response = _graph(account, "GET", f"/me/messages/{requests.utils.quote(graph_id, safe='')}/$value")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    if response.status_code in (400, 404):
+        raise HTTPException(status_code=404, detail="Message no longer exists")
+    if response.status_code >= 300:
+        raise HTTPException(status_code=502, detail=f"Graph message failed: {response.status_code}")
+    return response.content
+
+
 def act(account: GraphAccount, graph_id: str, action: str) -> dict[str, Any]:
     path = f"/me/messages/{requests.utils.quote(graph_id, safe='')}"
     try:
