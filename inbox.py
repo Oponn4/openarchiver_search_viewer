@@ -16,7 +16,9 @@ import json
 import os
 import re
 import ssl
-from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,6 +37,16 @@ TAG_LENGTH = 16
 IMAP_TIMEOUT_SECONDS = 20
 HEADER_FIELDS = "FROM TO SUBJECT DATE MESSAGE-ID"
 MAX_LIMIT = 200
+# A slow account must not hold the whole inbox back: answer after this many seconds with the
+# accounts that are done, and serve the others from their last result while they finish.
+INBOX_DEADLINE_SECONDS = float(os.environ.get("INBOX_DEADLINE_SECONDS", "4"))
+# A result younger than this is answered straight from the cache; a refresh still starts behind it.
+INBOX_FRESH_SECONDS = float(os.environ.get("INBOX_FRESH_SECONDS", "30"))
+# Servers without SPECIAL-USE flags (iCloud has none for Archive, some hosters have none at all).
+FALLBACK_FOLDERS = {
+    "archive": ["Archive", "Archives", "Archiv"],
+    "delete": ["Trash", "Papierkorb", "Gelöscht", "Deleted Messages", "Deleted Items", "Gelöschte Elemente"],
+}
 
 router = APIRouter()
 
@@ -150,6 +162,7 @@ def special_folders(conn: imaplib.IMAP4) -> dict[str, str]:
     if status != "OK":
         return {}
     found: dict[str, str] = {}
+    names: list[str] = []
     for line in lines or []:
         if not isinstance(line, bytes):
             continue
@@ -160,8 +173,11 @@ def special_folders(conn: imaplib.IMAP4) -> dict[str, str]:
         if name.startswith(b'"') and name.endswith(b'"'):
             name = name[1:-1].replace(b'\\"', b'"')
         decoded = _decode_modified_utf7(name.decode("ascii", "replace"))
+        names.append(decoded)
         for flag in match.group("flags").split():
             found.setdefault(flag.decode().lower(), decoded)
+    # All folder names, newline-joined under a key no real flag can have, for name fallbacks.
+    found["\\x-names"] = "\n".join(names)
     return found
 
 
@@ -273,20 +289,59 @@ def fetch_inbox(account: Account, limit: int) -> dict[str, Any]:
     return {"account_id": account.id, "account": account.name, "total": total, "unread": unread, "messages": messages}
 
 
+_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="inbox")
+_LOCK = threading.Lock()
+_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_INFLIGHT: dict[str, Future] = {}
+
+
+def _start_fetch(account: Account, limit: int) -> Future:
+    with _LOCK:
+        future = _INFLIGHT.get(account.id)
+        if future is None:
+            future = _POOL.submit(fetch_inbox, account, limit)
+
+            def done(finished: Future, account_id: str = account.id) -> None:
+                with _LOCK:
+                    _INFLIGHT.pop(account_id, None)
+                    if finished.exception() is None:
+                        _CACHE[account_id] = (time.time(), finished.result())
+
+            future.add_done_callback(done)
+            _INFLIGHT[account.id] = future
+        return future
+
+
 @router.get("/api/inbox")
 def get_inbox(limit: int = Query(50, ge=1, le=MAX_LIMIT)) -> dict[str, Any]:
     accounts = load_accounts()
+    futures = {account.id: _start_fetch(account, limit) for account in accounts}
+    with _LOCK:
+        all_fresh = all(
+            account.id in _CACHE and time.time() - _CACHE[account.id][0] < INBOX_FRESH_SECONDS
+            for account in accounts
+        )
+    if not all_fresh:
+        wait(futures.values(), timeout=INBOX_DEADLINE_SECONDS)
+
     results: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
-
-    def run(account: Account) -> None:
-        try:
-            results.append(fetch_inbox(account, limit))
-        except Exception as exc:  # one broken account must not hide the others
-            errors.append({"account_id": account.id, "account": account.name, "error": str(exc)})
-
-    with ThreadPoolExecutor(max_workers=max(1, len(accounts))) as pool:
-        list(pool.map(run, accounts))
+    now = time.time()
+    for account in accounts:
+        future = futures[account.id]
+        if future.done() and future.exception() is not None:
+            errors.append({"account_id": account.id, "account": account.name, "error": str(future.exception())})
+            continue
+        if future.done():
+            result, age = future.result(), 0.0
+        else:
+            with _LOCK:
+                cached = _CACHE.get(account.id)
+            if cached is None:
+                errors.append({"account_id": account.id, "account": account.name, "error": "pending"})
+                continue
+            result, age = cached[1], now - cached[0]
+        results.append({**result, "age_seconds": round(age, 1), "stale": not future.done()})
 
     messages = [message for result in results for message in result["messages"]]
     messages.sort(key=lambda item: item["date"] or "", reverse=True)
@@ -299,6 +354,27 @@ def get_inbox(limit: int = Query(50, ge=1, le=MAX_LIMIT)) -> dict[str, Any]:
         "errors": errors,
         "messages": messages[:limit],
     }
+
+
+def _forget_cached(item_id: str) -> None:
+    """Drop a message from the cached inbox so it does not reappear before the next refresh."""
+    account_id = item_id.split(":", 1)[0]
+    with _LOCK:
+        cached = _CACHE.get(account_id)
+        if cached:
+            fetched_at, result = cached
+            remaining = [message for message in result["messages"] if message["id"] != item_id]
+            _CACHE[account_id] = (fetched_at, {**result, "messages": remaining, "total": result["total"] - (len(result["messages"]) - len(remaining))})
+
+
+def _set_cached_seen(item_id: str, seen: bool) -> None:
+    account_id = item_id.split(":", 1)[0]
+    with _LOCK:
+        cached = _CACHE.get(account_id)
+        if cached:
+            for message in cached[1]["messages"]:
+                if message["id"] == item_id:
+                    message["seen"] = seen
 
 
 def _split_item_id(item_id: str) -> tuple[str, str, str]:
@@ -315,6 +391,9 @@ def _target_folder(conn: imaplib.IMAP4, action: str) -> str:
     else:
         # Gmail: moving out of INBOX into All Mail is exactly "remove the Inbox label".
         target = folders.get("\\archive") or folders.get("\\all")
+    if not target:
+        existing = set(folders.get("\\x-names", "").split("\n"))
+        target = next((name for name in FALLBACK_FOLDERS[action] if name in existing), None)
     if not target:
         raise HTTPException(status_code=409, detail=f"No folder for {action} on this account")
     return target
@@ -361,10 +440,13 @@ def inbox_action(item_id: str, action: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Message is no longer in the inbox")
         if action == "read":
             conn.uid("STORE", uid, "+FLAGS.SILENT", "(\\Seen)")
+            _set_cached_seen(item_id, True)
             return {"ok": True}
         if action == "unread":
             conn.uid("STORE", uid, "-FLAGS.SILENT", "(\\Seen)")
+            _set_cached_seen(item_id, False)
             return {"ok": True}
         target = _target_folder(conn, action)
         _move(conn, uid, target)
+        _forget_cached(item_id)
         return {"ok": True, "moved_to": target}
