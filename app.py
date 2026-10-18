@@ -24,6 +24,8 @@ from fastapi.responses import FileResponse, Response, RedirectResponse, JSONResp
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import inbox
+
 
 # pdf.js ships ES modules (.mjs) and wasm decoders. Browsers refuse to run a module script
 # served with a non-JavaScript MIME type, and the python:slim image has no /etc/mime.types
@@ -1117,6 +1119,9 @@ def scan_for_sender(
                 approx = True
 
     return matches, not approx
+
+
+app.include_router(inbox.router, dependencies=[Depends(verify_api_auth)])
 
 
 @app.get("/api/search", dependencies=[Depends(verify_api_auth)])
