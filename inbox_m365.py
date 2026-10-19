@@ -224,7 +224,7 @@ def fetch_inbox(account: GraphAccount, limit: int) -> dict[str, Any]:
         params={
             "$top": str(limit),
             "$orderby": "receivedDateTime desc",
-            "$select": "id,subject,from,receivedDateTime,isRead,flag,internetMessageId",
+            "$select": "id,subject,from,receivedDateTime,isRead,flag,internetMessageId,conversationId",
         },
     )
     if listing.status_code != 200:
@@ -246,6 +246,9 @@ def fetch_inbox(account: GraphAccount, limit: int) -> dict[str, Any]:
                 "subject": (item.get("subject") or "").replace("\x00", ""),
                 "date": _iso(item.get("receivedDateTime")),
                 "message_id": item.get("internetMessageId", ""),
+                # Graph has no References in the listing; its conversation id groups the thread.
+                "references": [],
+                "conversation_id": item.get("conversationId", ""),
             }
         )
     counts = folder.json()

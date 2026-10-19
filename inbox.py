@@ -43,7 +43,7 @@ SALT_LENGTH = 64
 IV_LENGTH = 16
 TAG_LENGTH = 16
 IMAP_TIMEOUT_SECONDS = 20
-HEADER_FIELDS = "FROM TO SUBJECT DATE MESSAGE-ID"
+HEADER_FIELDS = "FROM TO SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES"
 MAX_LIMIT = 200
 # Raw messages never change under their id (the id carries UIDVALIDITY), so they can be kept a
 # while. After every inbox fetch the newest few per account are fetched ahead, so opening a mail
@@ -287,9 +287,23 @@ def _parse_fetch(data: list[Any]) -> list[dict[str, Any]]:
                 "subject": str(headers.get("Subject", "")).replace("\x00", ""),
                 "date": date_value,
                 "message_id": str(headers.get("Message-ID", "")).strip(),
+                "references": _references(headers),
             }
         )
     return messages
+
+
+MESSAGE_ID_PATTERN = re.compile(r"<[^<>\s]+>")
+
+
+def _references(headers: Any) -> list[str]:
+    """Message-IDs this mail answers (References, then In-Reply-To), for grouping into threads."""
+    found: list[str] = []
+    for name in ("References", "In-Reply-To"):
+        for value in MESSAGE_ID_PATTERN.findall(str(headers.get(name, ""))):
+            if value not in found:
+                found.append(value)
+    return found
 
 
 def _uidvalidity(conn: imaplib.IMAP4) -> str:
