@@ -496,6 +496,19 @@ def inbox_action(item_id: str, action: str) -> dict[str, Any]:
     account = account_by_id(account_id)
     if isinstance(account, GraphAccount):
         raise HTTPException(status_code=400, detail="Malformed message id")
+    # Gmail sometimes stalls a single SELECT past the timeout (tp.oponn, 2026-10-20, while Open
+    # Archiver imported the same mailbox). One retry on a fresh connection; the actions are safe
+    # to repeat, a message already moved answers 404.
+    for attempt in (1, 2):
+        try:
+            return _imap_action(account, item_id, uidvalidity, uid, action)
+        except (TimeoutError, OSError, imaplib.IMAP4.abort) as error:
+            if attempt == 2:
+                raise HTTPException(status_code=504, detail=f"Mailbox did not answer in time ({type(error).__name__})")
+    raise AssertionError("unreachable")
+
+
+def _imap_action(account: Account, item_id: str, uidvalidity: str, uid: str, action: str) -> dict[str, Any]:
     with imap_connection(account) as conn:
         status, data = conn.select("INBOX")
         if status != "OK":
