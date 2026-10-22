@@ -344,6 +344,12 @@ _POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="inbox")
 _LOCK = threading.Lock()
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _INFLIGHT: dict[str, Future] = {}
+# Actions done through Apport, per account: (time, item id, "seen" | "unseen" | "gone"). A fetch
+# that started before an action returns the mailbox as it was; the action is applied to its
+# result again, otherwise a moved mail reappears and the unread count stays too high (Build 14:
+# "2 ungelesen" after everything was read and archived, until a later reload).
+_CHANGES: dict[str, list[tuple[float, str, str]]] = {}
+CHANGES_KEEP_SECONDS = 600
 
 
 def _start_fetch(account: Account, limit: int) -> Future:
@@ -351,13 +357,18 @@ def _start_fetch(account: Account, limit: int) -> Future:
         future = _INFLIGHT.get(account.id)
         if future is None:
             fetch = inbox_m365.fetch_inbox if isinstance(account, GraphAccount) else fetch_inbox
+            started = time.time()
             future = _POOL.submit(fetch, account, limit)
 
             def done(finished: Future, account_id: str = account.id, source: Account | GraphAccount = account) -> None:
                 with _LOCK:
                     _INFLIGHT.pop(account_id, None)
                     if finished.exception() is None:
-                        _CACHE[account_id] = (time.time(), finished.result())
+                        result = finished.result()
+                        for changed_at, item_id, change in _CHANGES.get(account_id, []):
+                            if changed_at >= started:
+                                _apply_change(result, item_id, change)
+                        _CACHE[account_id] = (time.time(), result)
                 if finished.exception() is None:
                     newest = sorted(finished.result()["messages"], key=lambda m: m.get("date") or "", reverse=True)
                     _PREFETCH_POOL.submit(_prefetch, source, [m["id"] for m in newest[:PREFETCH_PER_ACCOUNT]])
@@ -411,25 +422,43 @@ def get_inbox(limit: int = Query(50, ge=1, le=MAX_LIMIT)) -> dict[str, Any]:
     }
 
 
-def _forget_cached(item_id: str) -> None:
-    """Drop a message from the cached inbox so it does not reappear before the next refresh."""
+def _apply_change(result: dict[str, Any], item_id: str, change: str) -> None:
+    """Apply one action to a fetched inbox, keeping `total` and `unread` in step with the list."""
+    message = next((m for m in result["messages"] if m["id"] == item_id), None)
+    if message is None:
+        return
+    if change == "gone":
+        result["messages"] = [m for m in result["messages"] if m["id"] != item_id]
+        result["total"] = max(0, result["total"] - 1)
+        if not message["seen"]:
+            result["unread"] = max(0, result["unread"] - 1)
+        return
+    seen = change == "seen"
+    if message["seen"] != seen:
+        message["seen"] = seen
+        result["unread"] = max(0, result["unread"] + (-1 if seen else 1))
+
+
+def _record_change(item_id: str, change: str) -> None:
+    """Update the cached inbox now and remember the action for fetches already running."""
     account_id = item_id.split(":", 1)[0]
+    now = time.time()
     with _LOCK:
+        changes = [entry for entry in _CHANGES.get(account_id, []) if now - entry[0] < CHANGES_KEEP_SECONDS]
+        changes.append((now, item_id, change))
+        _CHANGES[account_id] = changes
         cached = _CACHE.get(account_id)
         if cached:
-            fetched_at, result = cached
-            remaining = [message for message in result["messages"] if message["id"] != item_id]
-            _CACHE[account_id] = (fetched_at, {**result, "messages": remaining, "total": result["total"] - (len(result["messages"]) - len(remaining))})
+            _apply_change(cached[1], item_id, change)
+
+
+def _forget_cached(item_id: str) -> None:
+    """Drop a message from the cached inbox so it does not reappear before the next refresh."""
+    _record_change(item_id, "gone")
 
 
 def _set_cached_seen(item_id: str, seen: bool) -> None:
-    account_id = item_id.split(":", 1)[0]
-    with _LOCK:
-        cached = _CACHE.get(account_id)
-        if cached:
-            for message in cached[1]["messages"]:
-                if message["id"] == item_id:
-                    message["seen"] = seen
+    _record_change(item_id, "seen" if seen else "unseen")
 
 
 def _split_item_id(item_id: str) -> tuple[str, str, str]:
