@@ -37,6 +37,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
 import inbox_m365
+import newsletters
 import unsubscribe
 from inbox_m365 import GraphAccount
 
@@ -684,11 +685,15 @@ def _viewer() -> Any:
 def _unsubscribe(item_id: str) -> dict[str, Any]:
     """One-Click-Abmeldung; die URL kommt aus der Mail selbst, nie aus der Anfrage."""
     _, payload = _raw(item_id)
-    way = unsubscribe.parse(BytesParser(policy=policy.default).parsebytes(payload))
+    message = BytesParser(policy=policy.default).parsebytes(payload)
+    way = unsubscribe.parse(message)
     if not way or way["method"] != "oneClick":
         raise HTTPException(status_code=409, detail="No one-click unsubscribe for this message")
     if not unsubscribe.one_click(way["url"]):
         raise HTTPException(status_code=502, detail="Unsubscribe request was not accepted")
+    sender = getaddresses([str(message.get("From", ""))])
+    if sender and sender[0][1]:
+        newsletters.remember(sender[0][1], sender[0][0])
     return {"ok": True}
 
 

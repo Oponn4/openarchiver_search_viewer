@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 import inbox
 import logos
+import newsletters
 
 
 # pdf.js ships ES modules (.mjs) and wasm decoders. Browsers refuse to run a module script
@@ -1127,6 +1128,7 @@ def scan_for_sender(
 
 app.include_router(inbox.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(logos.router, dependencies=[Depends(verify_api_auth)])
+app.include_router(newsletters.router, dependencies=[Depends(verify_api_auth)])
 
 
 @app.get("/api/search", dependencies=[Depends(verify_api_auth)])
