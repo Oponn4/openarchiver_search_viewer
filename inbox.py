@@ -37,6 +37,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
 import inbox_m365
+import unsubscribe
 from inbox_m365 import GraphAccount
 
 SALT_LENGTH = 64
@@ -508,6 +509,8 @@ ACTIONS = {"archive", "delete", "read", "unread"}
 
 @router.post("/api/inbox/{item_id}/{action}")
 def inbox_action(item_id: str, action: str) -> dict[str, Any]:
+    if action == "unsubscribe":
+        return _unsubscribe(item_id)
     if action not in ACTIONS:
         raise HTTPException(status_code=404, detail="Unknown action")
     if item_id.count(":") == 2 and item_id.split(":")[1] == "graph":
@@ -678,6 +681,17 @@ def _viewer() -> Any:
     return importlib.import_module("app")
 
 
+def _unsubscribe(item_id: str) -> dict[str, Any]:
+    """One-Click-Abmeldung; die URL kommt aus der Mail selbst, nie aus der Anfrage."""
+    _, payload = _raw(item_id)
+    way = unsubscribe.parse(BytesParser(policy=policy.default).parsebytes(payload))
+    if not way or way["method"] != "oneClick":
+        raise HTTPException(status_code=409, detail="No one-click unsubscribe for this message")
+    if not unsubscribe.one_click(way["url"]):
+        raise HTTPException(status_code=502, detail="Unsubscribe request was not accepted")
+    return {"ok": True}
+
+
 @router.get("/api/inbox/{item_id}/message")
 def inbox_message(item_id: str) -> dict[str, Any]:
     account, payload = _raw(item_id)
@@ -729,6 +743,7 @@ def inbox_message(item_id: str) -> dict[str, Any]:
             "attachmentCount": len(attachments),
             "timestamp": timestamp,
             "messageIdHeader": str(message.get("Message-ID", "")).strip(),
+            "unsubscribe": unsubscribe.parse(message),
         }
     }
 
