@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import inbox
+import spam
 import logos
 import newsletters
 
@@ -1129,6 +1130,7 @@ def scan_for_sender(
 app.include_router(inbox.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(logos.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(newsletters.router, dependencies=[Depends(verify_api_auth)])
+app.include_router(spam.router, dependencies=[Depends(verify_api_auth)])
 
 
 @app.get("/api/search", dependencies=[Depends(verify_api_auth)])

@@ -30,7 +30,8 @@ SCOPES = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com
 HTTP_TIMEOUT_SECONDS = 20
 IMMUTABLE_IDS = {"Prefer": 'IdType="ImmutableId"'}
 # Well-known Graph folder names; they work in every mailbox language.
-TARGET_FOLDERS = {"archive": "archive", "delete": "deleteditems"}
+TARGET_FOLDERS = {"archive": "archive", "delete": "deleteditems", "notspam": "inbox"}
+FOLDERS = {"inbox": "inbox", "spam": "junkemail"}
 
 
 @dataclass(frozen=True)
@@ -213,14 +214,15 @@ def _iso(value: str | None) -> str | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
 
 
-def fetch_inbox(account: GraphAccount, limit: int) -> dict[str, Any]:
-    folder = _graph(account, "GET", "/me/mailFolders/inbox?$select=totalItemCount,unreadItemCount")
+def fetch_inbox(account: GraphAccount, limit: int, box: str = "inbox") -> dict[str, Any]:
+    name = FOLDERS[box]
+    folder = _graph(account, "GET", f"/me/mailFolders/{name}?$select=totalItemCount,unreadItemCount")
     if folder.status_code != 200:
         raise RuntimeError(f"Graph inbox failed: {folder.status_code}")
     listing = _graph(
         account,
         "GET",
-        "/me/mailFolders/inbox/messages",
+        f"/me/mailFolders/{name}/messages",
         params={
             "$top": str(limit),
             "$orderby": "receivedDateTime desc",
@@ -249,6 +251,7 @@ def fetch_inbox(account: GraphAccount, limit: int) -> dict[str, Any]:
                 # Graph has no References in the listing; its conversation id groups the thread.
                 "references": [],
                 "conversation_id": item.get("conversationId", ""),
+                "auth_failed": False,
             }
         )
     counts = folder.json()

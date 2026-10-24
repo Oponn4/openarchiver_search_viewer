@@ -65,7 +65,11 @@ INBOX_FRESH_SECONDS = float(os.environ.get("INBOX_FRESH_SECONDS", "30"))
 FALLBACK_FOLDERS = {
     "archive": ["Archive", "Archives", "Archiv"],
     "delete": ["Trash", "Papierkorb", "Gelöscht", "Deleted Messages", "Deleted Items", "Gelöschte Elemente"],
+    # iCloud has "Junk" and an old "Junk E-mail"; the first match wins, so the real one goes first.
+    "spam": ["Junk", "Spam", "Spamverdacht", "Junk E-mail", "Junk-E-Mail", "INBOX/Spam", "Bulk Mail"],
 }
+# Spam listings also carry the server's verdict on the sender, to tell a spoofed From apart.
+SPAM_HEADER_FIELDS = f"{HEADER_FIELDS} AUTHENTICATION-RESULTS"
 
 router = APIRouter()
 
@@ -290,6 +294,8 @@ def _parse_fetch(data: list[Any]) -> list[dict[str, Any]]:
                 "date": date_value,
                 "message_id": str(headers.get("Message-ID", "")).strip(),
                 "references": _references(headers),
+                # Only fetched for spam: the receiving server found the From domain forged.
+                "auth_failed": bool(re.search(r"\bdmarc=fail\b", str(headers.get("Authentication-Results", "")), re.I)),
             }
         )
     return messages
@@ -308,21 +314,37 @@ def _references(headers: Any) -> list[str]:
     return found
 
 
+def mailbox_name(conn: imaplib.IMAP4, box: str) -> str:
+    """Folder behind a box: "inbox" or "spam" (special-use \\Junk, else a known name)."""
+    if box == "inbox":
+        return "INBOX"
+    folders = special_folders(conn)
+    target = folders.get("\\junk")
+    if not target:
+        existing = set(folders.get("\\x-names", "").split("\n"))
+        target = next((name for name in FALLBACK_FOLDERS["spam"] if name in existing), None)
+    if not target:
+        raise HTTPException(status_code=409, detail="No spam folder on this account")
+    return target
+
+
 def _uidvalidity(conn: imaplib.IMAP4) -> str:
     _, data = conn.response("UIDVALIDITY")
     return data[0].decode() if data and data[0] else "0"
 
 
-def fetch_inbox(account: Account, limit: int) -> dict[str, Any]:
+def fetch_inbox(account: Account, limit: int, box: str = "inbox") -> dict[str, Any]:
     # Gmail answers every UID SEARCH in about 1.5 s, so avoid SEARCH entirely: STATUS gives the
     # unread count, SELECT the message count, and the newest messages are a sequence range.
     with imap_connection(account) as conn:
-        status, data = conn.status("INBOX", "(UNSEEN)")
+        folder = mailbox_name(conn, box)
+        mailbox = _quote_mailbox(folder)
+        status, data = conn.status(mailbox, "(UNSEEN)")
         unread_match = re.search(rb"UNSEEN (\d+)", data[0]) if status == "OK" and data and data[0] else None
         unread = int(unread_match.group(1)) if unread_match else 0
-        status, data = conn.select("INBOX", readonly=True)
+        status, data = conn.select(mailbox, readonly=True)
         if status != "OK":
-            raise RuntimeError(f"SELECT INBOX failed: {data}")
+            raise RuntimeError(f"SELECT {folder} failed: {data}")
         uidvalidity = _uidvalidity(conn)
         total = int(data[0]) if data and data[0] else 0
         messages: list[dict[str, Any]] = []
@@ -330,7 +352,7 @@ def fetch_inbox(account: Account, limit: int) -> dict[str, Any]:
             first = max(1, total - limit + 1)
             status, data = conn.fetch(
                 f"{first}:{total}",
-                f"(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS ({HEADER_FIELDS})])",
+                f"(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS ({SPAM_HEADER_FIELDS if box == 'spam' else HEADER_FIELDS})])",
             )
             if status != "OK":
                 raise RuntimeError(f"FETCH failed: {data}")
@@ -541,17 +563,25 @@ def inbox_action(item_id: str, action: str) -> dict[str, Any]:
     raise AssertionError("unreachable")
 
 
-def _imap_action(account: Account, item_id: str, uidvalidity: str, uid: str, action: str) -> dict[str, Any]:
+def _imap_action(
+    account: Account, item_id: str, uidvalidity: str, uid: str, action: str, box: str = "inbox"
+) -> dict[str, Any]:
     with imap_connection(account) as conn:
-        status, data = conn.select("INBOX")
+        folder = mailbox_name(conn, box)
+        status, data = conn.select(_quote_mailbox(folder))
         if status != "OK":
-            raise HTTPException(status_code=502, detail=f"SELECT INBOX failed: {data}")
+            raise HTTPException(status_code=502, detail=f"SELECT {folder} failed: {data}")
         current = _uidvalidity(conn)
         if current != uidvalidity:
             raise HTTPException(status_code=409, detail="Mailbox changed, reload the inbox")
         status, data = conn.uid("SEARCH", None, f"UID {uid}")
         if status != "OK" or not data or not data[0]:
-            raise HTTPException(status_code=404, detail="Message is no longer in the inbox")
+            raise HTTPException(status_code=404, detail=f"Message is no longer in {folder}")
+        if box != "inbox":
+            # Out of spam: "notspam" back to the inbox (Gmail learns from that), "delete" to trash.
+            target = "INBOX" if action == "notspam" else _target_folder(conn, "delete")
+            _move(conn, uid, target)
+            return {"ok": True, "moved_to": target}
         if action == "read":
             conn.uid("STORE", uid, "+FLAGS.SILENT", "(\\Seen)")
             _set_cached_seen(item_id, True)
@@ -625,7 +655,7 @@ def _prefetch(account: Account | GraphAccount, item_ids: list[str]) -> None:
         pass
 
 
-def _fetch_raw(item_id: str) -> tuple[Account | GraphAccount, bytes]:
+def _fetch_raw(item_id: str, box: str = "inbox") -> tuple[Account | GraphAccount, bytes]:
     if item_id.count(":") == 2 and item_id.split(":")[1] == "graph":
         account_id, _, encoded = item_id.split(":")
         account = account_by_id(account_id)
@@ -638,9 +668,10 @@ def _fetch_raw(item_id: str) -> tuple[Account | GraphAccount, bytes]:
         raise HTTPException(status_code=400, detail="Malformed message id")
     with imap_connection(account) as conn:
         # Read-only and BODY.PEEK: opening a mail must not mark it read; the app does that on purpose.
-        status, data = conn.select("INBOX", readonly=True)
+        folder = mailbox_name(conn, box)
+        status, data = conn.select(_quote_mailbox(folder), readonly=True)
         if status != "OK":
-            raise HTTPException(status_code=502, detail=f"SELECT INBOX failed: {data}")
+            raise HTTPException(status_code=502, detail=f"SELECT {folder} failed: {data}")
         if _uidvalidity(conn) != uidvalidity:
             raise HTTPException(status_code=409, detail="Mailbox changed, reload the inbox")
         status, data = conn.uid("FETCH", uid, "(BODY.PEEK[])")
@@ -652,14 +683,16 @@ def _fetch_raw(item_id: str) -> tuple[Account | GraphAccount, bytes]:
     return account, payload
 
 
-def _raw(item_id: str) -> tuple[Account | GraphAccount, bytes]:
+def _raw(item_id: str, box: str = "inbox") -> tuple[Account | GraphAccount, bytes]:
+    # UIDs count per folder: the same id can name one mail in INBOX and another in spam.
+    key = item_id if box == "inbox" else f"{box}|{item_id}"
     now = time.time()
     with _RAW_LOCK:
-        cached = _RAW_CACHE.get(item_id)
+        cached = _RAW_CACHE.get(key)
     if cached and now - cached[0] < RAW_CACHE_SECONDS:
         return account_by_id(item_id.split(":", 1)[0]), cached[1]
-    account, payload = _fetch_raw(item_id)
-    _store_raw(item_id, payload)
+    account, payload = _fetch_raw(item_id, box)
+    _store_raw(key, payload)
     return account, payload
 
 
@@ -699,7 +732,11 @@ def _unsubscribe(item_id: str) -> dict[str, Any]:
 
 @router.get("/api/inbox/{item_id}/message")
 def inbox_message(item_id: str) -> dict[str, Any]:
-    account, payload = _raw(item_id)
+    return message_response(item_id, "inbox")
+
+
+def message_response(item_id: str, box: str) -> dict[str, Any]:
+    account, payload = _raw(item_id, box)
     viewer = _viewer()
     message = BytesParser(policy=policy.default).parsebytes(payload)
     content = viewer.extract_message_content(message)
@@ -713,7 +750,7 @@ def inbox_message(item_id: str) -> dict[str, Any]:
                 "filename": filename,
                 "mimeType": viewer.normalized_mime_type(filename, part.get_content_type(), data),
                 "sizeBytes": len(data),
-                "viewUrl": f"/api/inbox/{item_id}/attachments/{index}",
+                "viewUrl": f"/api/{box}/{item_id}/attachments/{index}",
             }
         )
     timestamp = None
@@ -755,7 +792,11 @@ def inbox_message(item_id: str) -> dict[str, Any]:
 
 @router.get("/api/inbox/{item_id}/attachments/{index}")
 def inbox_attachment(item_id: str, index: int, download: bool = False) -> Response:
-    _, payload = _raw(item_id)
+    return attachment_response(item_id, index, download, "inbox")
+
+
+def attachment_response(item_id: str, index: int, download: bool, box: str) -> Response:
+    _, payload = _raw(item_id, box)
     viewer = _viewer()
     parts = _attachment_parts(BytesParser(policy=policy.default).parsebytes(payload))
     if not 0 <= index < len(parts):
