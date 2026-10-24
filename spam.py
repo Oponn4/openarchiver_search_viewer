@@ -36,8 +36,11 @@ def _fetch(account: inbox.Account | GraphAccount, limit: int) -> dict[str, Any]:
     return inbox.fetch_inbox(account, limit, "spam")
 
 
-def _known(addresses: list[str]) -> dict[str, dict[str, int]]:
-    """Per address: mails outside spam folders, and mails we sent to it, from the archive."""
+def _known(addresses: list[str], spam_ids: list[str]) -> dict[str, dict[str, int]]:
+    """Per address: mails outside spam folders, and mails we sent to it, from the archive.
+
+    The listed spam itself does not count, even where the archive caught it in another folder.
+    """
     url = os.environ.get("OA_DATABASE_URL", "")
     if not url or not addresses:
         return {}
@@ -46,8 +49,9 @@ def _known(addresses: list[str]) -> dict[str, dict[str, int]]:
         for address, count in conn.execute(
             "select lower(sender_email), count(distinct coalesce(message_id_header, id::text)) "
             "from archived_emails where lower(sender_email) = any(%s) "
-            "and coalesce(path, '') !~* '(spam|junk)' group by 1",
-            (addresses,),
+            "and coalesce(path, '') !~* '(spam|junk)' "
+            "and coalesce(message_id_header, '') <> all(%s) group by 1",
+            (addresses, spam_ids),
         ):
             known.setdefault(address, {"received": 0, "wrote": 0})["received"] = count
         for address, count in conn.execute(
@@ -78,7 +82,10 @@ def get_spam(limit: int = Query(100, ge=1, le=inbox.MAX_LIMIT)) -> dict[str, Any
 
     messages = [message for result in results for message in result["messages"]]
     try:
-        known = _known(sorted({m["from_address"].lower() for m in messages if m.get("from_address")}))
+        known = _known(
+            sorted({m["from_address"].lower() for m in messages if m.get("from_address")}),
+            [m["message_id"] for m in messages if m.get("message_id")],
+        )
     except psycopg.Error:
         known = {}
     for message in messages:
