@@ -38,6 +38,7 @@ from fastapi.responses import Response
 
 import inbox_m365
 import newsletters
+import users
 import unsubscribe
 from inbox_m365 import GraphAccount
 
@@ -114,6 +115,11 @@ def enabled_account_names() -> set[str] | None:
 
 
 def load_accounts() -> list[Account | GraphAccount]:
+    """Accounts of the signed-in user (users.py)."""
+    return [account for account in _load_all_accounts() if users.allowed(account.name)]
+
+
+def _load_all_accounts() -> list[Account | GraphAccount]:
     url = os.environ.get("OA_DATABASE_URL", "")
     if not url:
         raise HTTPException(status_code=500, detail="OA_DATABASE_URL is not set")
@@ -160,7 +166,8 @@ def cached_accounts() -> list[Account | GraphAccount]:
     with _ACCOUNTS_LOCK:
         if _ACCOUNTS and time.time() - _ACCOUNTS[0] < ACCOUNTS_CACHE_SECONDS:
             return _ACCOUNTS[1]
-    accounts = load_accounts()
+    # All users share this cache; account_by_id filters per user.
+    accounts = _load_all_accounts()
     with _ACCOUNTS_LOCK:
         _ACCOUNTS = (time.time(), accounts)
     return accounts
@@ -168,7 +175,7 @@ def cached_accounts() -> list[Account | GraphAccount]:
 
 def account_by_id(account_id: str) -> Account | GraphAccount:
     for account in cached_accounts():
-        if account.id == account_id:
+        if account.id == account_id and users.allowed(account.name):
             return account
     raise HTTPException(status_code=404, detail="Unknown account")
 

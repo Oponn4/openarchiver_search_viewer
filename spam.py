@@ -21,6 +21,7 @@ from fastapi.responses import Response
 
 import inbox
 import inbox_m365
+import users
 from inbox_m365 import GraphAccount
 
 router = APIRouter()
@@ -45,21 +46,25 @@ def _known(addresses: list[str], spam_ids: list[str]) -> dict[str, dict[str, int
     if not url or not addresses:
         return {}
     known: dict[str, dict[str, int]] = {}
+    # Only the user's own archive: whom someone else wrote to is none of this user's business.
+    sources = users.source_ids()
+    condition = " and ingestion_source_id::text = any(%s)" if sources is not None else ""
+    extra = [sources] if sources is not None else []
     with psycopg.connect(url, connect_timeout=5) as conn:
         for address, count in conn.execute(
             "select lower(sender_email), count(distinct coalesce(message_id_header, id::text)) "
             "from archived_emails where lower(sender_email) = any(%s) "
             "and coalesce(path, '') !~* '(spam|junk)' "
-            "and coalesce(message_id_header, '') <> all(%s) group by 1",
-            (addresses, spam_ids),
+            "and coalesce(message_id_header, '') <> all(%s)" + condition + " group by 1",
+            [addresses, spam_ids, *extra],
         ):
             known.setdefault(address, {"received": 0, "wrote": 0})["received"] = count
         for address, count in conn.execute(
             "select lower(r->>'address'), count(distinct coalesce(message_id_header, id::text)) "
             "from archived_emails, jsonb_array_elements("
             "  coalesce(recipients->'to', '[]'::jsonb) || coalesce(recipients->'cc', '[]'::jsonb)) r "
-            "where path ~* '(sent|gesendet)' and lower(r->>'address') = any(%s) group by 1",
-            (addresses,),
+            "where path ~* '(sent|gesendet)' and lower(r->>'address') = any(%s)" + condition + " group by 1",
+            [addresses, *extra],
         ):
             known.setdefault(address, {"received": 0, "wrote": 0})["wrote"] = count
     return known

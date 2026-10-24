@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 import logos
 import unsubscribe
+import users
 
 router = APIRouter()
 
@@ -33,7 +34,8 @@ HEADER_BYTES = 128 * 1024
 NOTIFICATION_DOMAINS = {"github.com", "gitlab.com"}
 
 _LOCK = threading.Lock()
-_CACHE: dict[str, Any] = {}
+# One overview per user (users.py), each built from that user's mail sources only.
+_CACHES: dict[str, dict[str, Any]] = {}
 
 
 def _archive_root() -> Path:
@@ -41,7 +43,15 @@ def _archive_root() -> Path:
 
 
 def _state_file(name: str = "unsubscribed") -> Path:
-    return Path(os.environ.get("APPORT_STATE_DIR", "/data")) / f"{name}.json"
+    return Path(os.environ.get("APPORT_STATE_DIR", "/data")) / f"{users.state_name(name)}.json"
+
+
+def _source_filter() -> tuple[str, list[Any]]:
+    """SQL condition and parameters limiting archived_emails to the user's sources."""
+    sources = users.source_ids()
+    if sources is None:
+        return "", []
+    return " and ingestion_source_id::text = any(%s)", [sources]
 
 
 def _load_marks(name: str = "unsubscribed") -> dict[str, dict[str, Any]]:
@@ -96,11 +106,12 @@ def _rows() -> list[tuple[Any, ...]]:
                max(sent_at),
                (array_agg(storage_path order by sent_at desc))[1]
         from archived_emails
-        where sent_at > now() - interval '12 months'
+        where sent_at > now() - interval '12 months' {condition}
         group by 1
     """
+    condition, params = _source_filter()
     with psycopg.connect(url, connect_timeout=5) as conn:
-        return conn.execute(query).fetchall()
+        return conn.execute(query.format(condition=condition), params).fetchall()
 
 
 def _since(groups: dict[str, set[str]], marks: dict[str, dict[str, Any]]) -> dict[str, tuple[int, datetime | None]]:
@@ -111,11 +122,12 @@ def _since(groups: dict[str, set[str]], marks: dict[str, dict[str, Any]]) -> dic
     url = os.environ.get("OA_DATABASE_URL", "")
     oldest = min(datetime.fromtimestamp(mark["at"] / 1000, timezone.utc) for mark in wanted.values())
     addresses = sorted(set().union(*(groups[key] for key in wanted)))
+    condition, params = _source_filter()
     with psycopg.connect(url, connect_timeout=5) as conn:
         rows = conn.execute(
             "select lower(sender_email), sent_at from archived_emails "
-            "where sent_at > %s and lower(sender_email) = any(%s)",
-            (oldest, addresses),
+            "where sent_at > %s and lower(sender_email) = any(%s)" + condition,
+            [oldest, addresses, *params],
         ).fetchall()
     result: dict[str, tuple[int, datetime | None]] = {}
     for key, mark in wanted.items():
@@ -169,11 +181,12 @@ def build() -> dict[str, Any]:
 
 
 def _cached(refresh: bool) -> dict[str, Any]:
+    user = users.CURRENT.get() or ""
     with _LOCK:
-        if refresh or not _CACHE or time.time() * 1000 - _CACHE["generatedAt"] > CACHE_SECONDS * 1000:
-            _CACHE.clear()
-            _CACHE.update(build())
-        return _CACHE
+        cache = _CACHES.get(user)
+        if refresh or not cache or time.time() * 1000 - cache["generatedAt"] > CACHE_SECONDS * 1000:
+            cache = _CACHES[user] = build()
+        return cache
 
 
 @router.get("/api/newsletters")

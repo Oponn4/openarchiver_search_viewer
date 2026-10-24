@@ -17,6 +17,7 @@ from uuid import UUID
 import uuid
 import random
 import asyncio
+import psycopg
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Depends, Cookie, Request
@@ -28,6 +29,7 @@ import inbox
 import spam
 import logos
 import newsletters
+import users
 
 
 # pdf.js ships ES modules (.mjs) and wasm decoders. Browsers refuse to run a module script
@@ -347,9 +349,18 @@ async def no_cache_headers(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def current_user(request: Request, call_next):
+    # Set before call_next: the endpoint runs in a copy of this context and sees the user.
+    users.CURRENT.set(SESSION_USERS.get(request.cookies.get("auth_token") or ""))
+    return await call_next(request)
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 VALID_SESSIONS: dict[str, float | None] = {}
+# Which user a session belongs to (see users.py); the owner when users.json does not exist.
+SESSION_USERS: dict[str, str] = {}
 
 
 def t(key: str, **values: Any) -> str:
@@ -393,6 +404,7 @@ def prune_expired_sessions() -> None:
     for token, expires_at in list(VALID_SESSIONS.items()):
         if expires_at is not None and expires_at <= now:
             VALID_SESSIONS.pop(token, None)
+            SESSION_USERS.pop(token, None)
 
 
 def is_valid_auth_token(auth_token: str | None) -> bool:
@@ -419,13 +431,15 @@ async def login(req: LoginRequest):
     if not NEED_LOG_IN:
         return JSONResponse({"success": True})
 
-    if req.password != SITE_PASSWORD:
+    user = users.user_for_password(req.password, SITE_PASSWORD)
+    if user is None:
         await asyncio.sleep(random.uniform(1.0, 3.0))
         raise HTTPException(status_code=401, detail=t("invalidPassword"))
-    
+
     prune_expired_sessions()
     token = uuid.uuid4().hex
     VALID_SESSIONS[token] = remember_login_expires_at()
+    SESSION_USERS[token] = user
     response = JSONResponse({"success": True})
     cookie_options: dict[str, Any] = {"httponly": True, "samesite": "lax"}
     if REMEMBER_LOGIN:
@@ -437,6 +451,7 @@ async def login(req: LoginRequest):
 def logout(auth_token: str | None = Cookie(None)):
     if auth_token in VALID_SESSIONS:
         VALID_SESSIONS.pop(auth_token, None)
+        SESSION_USERS.pop(auth_token, None)
     response = JSONResponse({"success": True})
     response.delete_cookie("auth_token")
     return response
@@ -1174,6 +1189,15 @@ def search_emails(
     # Erweiterte Filter (Outlook/eM-Client-Stil: Absender, Zeitraum, Anhang) -- reichen 1:1
     # an OpenArchivers eigene Parameter durch, die koennen das schon laenger, unsere UI
     # hat es bisher nur nie angeboten.
+    # Only the signed-in user's mail sources. OA treats an empty list as no filter, so an
+    # empty list answers here, before OA is asked.
+    allowed_sources = users.source_ids()
+    if allowed_sources is not None:
+        if not allowed_sources:
+            return {"items": [], "total": 0, "page": 1, "limit": limit, "totalPages": 0, "processingTimeMs": None,
+                    "maxLimit": settings.search_max_limit, "query": q, "keywords": keywords, "sort": sort,
+                    "senderApprox": False, "exact": exact}
+        base_params["sources"] = ",".join(allowed_sources)
     if date_from:
         base_params["dateFrom"] = date_from
     if date_to:
@@ -1281,8 +1305,22 @@ def _cached_get_mail_detail(message_id: UUID) -> dict[str, Any]:
     payload = fetch_mail_payload(settings, message_id)
     return normalize_mail_detail(payload)
 
+def ensure_mail_allowed(message_id: UUID) -> None:
+    """404 for archived mail from a source the signed-in user does not see."""
+    allowed_sources = users.source_ids()
+    if allowed_sources is None:
+        return
+    with psycopg.connect(os.environ.get("OA_DATABASE_URL", ""), connect_timeout=5) as conn:
+        row = conn.execute(
+            "select ingestion_source_id from archived_emails where id = %s", (str(message_id),)
+        ).fetchone()
+    if row is None or str(row[0]) not in allowed_sources:
+        raise HTTPException(status_code=404, detail=t("mailOpenArchiverFailed"))
+
+
 @app.get("/api/mail/{message_id}", dependencies=[Depends(verify_api_auth)])
 def get_mail(message_id: UUID) -> dict[str, Any]:
+    ensure_mail_allowed(message_id)
     return {
         "item": _cached_get_mail_detail(message_id),
         "mailViewUrl": f"/mail/{message_id}",
@@ -1291,6 +1329,7 @@ def get_mail(message_id: UUID) -> dict[str, Any]:
 
 @app.get("/api/mail/{message_id}/eml", dependencies=[Depends(verify_api_auth)])
 def download_eml(message_id: UUID) -> Response:
+    ensure_mail_allowed(message_id)
     settings = SETTINGS
     payload = fetch_mail_payload(settings, message_id)
     
@@ -1403,6 +1442,7 @@ def _cached_get_attachment_data(message_id: UUID, attachment_id: str) -> tuple[b
 
 @app.get("/api/mail/{message_id}/attachments/{attachment_id}", dependencies=[Depends(verify_api_auth)])
 def get_attachment(message_id: UUID, attachment_id: str, download: bool = False) -> Response:
+    ensure_mail_allowed(message_id)
     response_content, mime_type, filename = _cached_get_attachment_data(message_id, attachment_id)
     is_active_content = is_active_attachment(filename, mime_type)
     headers = {
