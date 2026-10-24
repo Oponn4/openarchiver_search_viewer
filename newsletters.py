@@ -40,19 +40,19 @@ def _archive_root() -> Path:
     return Path(os.environ.get("APPORT_ARCHIVE_DIR", "/archive")).resolve()
 
 
-def _state_file() -> Path:
-    return Path(os.environ.get("APPORT_STATE_DIR", "/data")) / "unsubscribed.json"
+def _state_file(name: str = "unsubscribed") -> Path:
+    return Path(os.environ.get("APPORT_STATE_DIR", "/data")) / f"{name}.json"
 
 
-def _load_marks() -> dict[str, dict[str, Any]]:
+def _load_marks(name: str = "unsubscribed") -> dict[str, dict[str, Any]]:
     try:
-        return json.loads(_state_file().read_text())
+        return json.loads(_state_file(name).read_text())
     except (OSError, ValueError):
         return {}
 
 
-def _save_marks(marks: dict[str, dict[str, Any]]) -> None:
-    path = _state_file()
+def _save_marks(marks: dict[str, dict[str, Any]], name: str = "unsubscribed") -> None:
+    path = _state_file(name)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(marks, ensure_ascii=False, indent=1))
     temporary.replace(path)
@@ -181,11 +181,14 @@ def _cached(refresh: bool) -> dict[str, Any]:
 def newsletters(refresh: bool = False) -> dict[str, Any]:
     data = _cached(refresh)
     marks = _load_marks()
+    hidden_marks = _load_marks("hidden")
     since = _since(data["addresses"], marks)
-    active, done = [], []
+    active, done, hidden = [], [], []
     for sender in data["senders"]:
         mark = marks.get(sender["key"])
-        if mark:
+        if sender["key"] in hidden_marks:
+            hidden.append(sender)
+        elif mark:
             count, last = since.get(sender["key"], (0, None))
             done.append({**sender, "unsubscribedAt": mark["at"], "sinceCount": count, "sinceLastAt": _ms(last)})
         else:
@@ -198,7 +201,7 @@ def newsletters(refresh: bool = False) -> dict[str, Any]:
                          "domain": mark.get("address", "").rpartition("@")[2], "unsubscribedAt": mark["at"],
                          "sinceCount": 0, "sinceLastAt": None})
     done.sort(key=lambda sender: sender["unsubscribedAt"], reverse=True)
-    return {"generatedAt": data["generatedAt"], "senders": active, "unsubscribed": done}
+    return {"generatedAt": data["generatedAt"], "senders": active, "unsubscribed": done, "hidden": hidden}
 
 
 def remember(address: str, name: str) -> None:
@@ -229,6 +232,25 @@ def unmark(key: str) -> dict[str, Any]:
         marks = _load_marks()
         marks.pop(key, None)
         _save_marks(marks)
+    return {"ok": True}
+
+
+@router.post("/api/newsletters/hide/{key}")
+def hide(key: str) -> dict[str, Any]:
+    """Aus der Liste nehmen, ohne abzumelden: bei Spam bestätigt ein Abmeldeklick nur die Adresse."""
+    with _LOCK:
+        marks = _load_marks("hidden")
+        marks[key] = {"at": int(time.time() * 1000)}
+        _save_marks(marks, "hidden")
+    return {"ok": True}
+
+
+@router.delete("/api/newsletters/hide/{key}")
+def unhide(key: str) -> dict[str, Any]:
+    with _LOCK:
+        marks = _load_marks("hidden")
+        marks.pop(key, None)
+        _save_marks(marks, "hidden")
     return {"ok": True}
 
 
