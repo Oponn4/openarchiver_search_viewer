@@ -85,7 +85,8 @@ def _rows() -> list[tuple[Any, ...]]:
     url = os.environ.get("OA_DATABASE_URL", "")
     if not url:
         raise HTTPException(status_code=500, detail="OA_DATABASE_URL is not set")
-    # Dieselbe Mail an zwei eigene Adressen zählt einmal (gleiche Message-ID).
+    # Dieselbe Mail an zwei eigene Adressen zählt einmal (gleiche Message-ID). Spam-Ordner
+    # bleiben draußen: dort tarnen sich Absender gern mit dem eigenen Namen.
     query = """
         select lower(sender_email),
                max(sender_name),
@@ -96,6 +97,7 @@ def _rows() -> list[tuple[Any, ...]]:
                (array_agg(storage_path order by sent_at desc))[1]
         from archived_emails
         where sent_at > now() - interval '12 months'
+          and storage_path !~* '/emails/[^<]*(spam|junk)[^<]*<'
         group by 1
     """
     with psycopg.connect(url, connect_timeout=5) as conn:
