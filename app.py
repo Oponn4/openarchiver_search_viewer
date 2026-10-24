@@ -352,7 +352,10 @@ async def no_cache_headers(request: Request, call_next):
 @app.middleware("http")
 async def current_user(request: Request, call_next):
     # Set before call_next: the endpoint runs in a copy of this context and sees the user.
-    users.CURRENT.set(SESSION_USERS.get(request.cookies.get("auth_token") or ""))
+    user = SESSION_USERS.get(request.cookies.get("auth_token") or "")
+    users.CURRENT.set(user)
+    if request.url.path in ("/api/inbox", "/api/spam", "/api/newsletters") and user is None and users.multi_user():
+        print(f"no user for {request.url.path}: cookie {'set' if request.cookies.get('auth_token') else 'missing'}", flush=True)
     return await call_next(request)
 
 
@@ -440,6 +443,8 @@ async def login(req: LoginRequest):
     token = uuid.uuid4().hex
     VALID_SESSIONS[token] = remember_login_expires_at()
     SESSION_USERS[token] = user
+    # Which user a login maps to; the uvicorn access log shows only the path.
+    print(f"login: user={user} sessions={sum(1 for u in SESSION_USERS.values() if u == user)}", flush=True)
     response = JSONResponse({"success": True})
     cookie_options: dict[str, Any] = {"httponly": True, "samesite": "lax"}
     if REMEMBER_LOGIN:
