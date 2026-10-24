@@ -1,6 +1,6 @@
 [app]
-need_log_in = false
-remember_login = false
+need_log_in = true
+remember_login = true
 language = "en"
 title = "Company Email Search"
 
