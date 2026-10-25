@@ -37,7 +37,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Request
+import psycopg
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import inbox
@@ -294,6 +295,30 @@ def compose_start(item: str, mode: str, box: str = "inbox") -> dict[str, Any]:
     }
 
 
+# --- Recipient suggestions from the archive ----------------------------------------------
+
+
+@router.get("/api/compose/suggest")
+def suggest(q: str = Query(..., min_length=2, max_length=100)) -> dict[str, Any]:
+    """Addresses the user has written to (Sent folders in the archive), most used first."""
+    url = os.environ.get("OA_DATABASE_URL", "")
+    if not url:
+        return {"items": []}
+    query = q.strip().lower().replace("\\", "").replace("%", "").replace("_", "")
+    sources = users.source_ids()
+    condition = " and ingestion_source_id::text = any(%s)" if sources is not None else ""
+    extra = [sources] if sources is not None else []
+    with psycopg.connect(url, connect_timeout=5) as conn:
+        rows = conn.execute(
+            "select lower(r->>'address'), max(r->>'name'), count(*) from archived_emails, jsonb_array_elements("
+            "  coalesce(recipients->'to', '[]'::jsonb) || coalesce(recipients->'cc', '[]'::jsonb)) r "
+            "where path ~* '(sent|gesendet)' and (lower(r->>'address') like %s or lower(r->>'name') like %s)"
+            + condition + " group by 1 order by 3 desc limit 8",
+            [f"{query}%", f"%{query}%", *extra],
+        ).fetchall()
+    return {"items": [{"address": address, "name": name or "", "count": count} for address, name, count in rows if address]}
+
+
 # --- Attachments the user adds -------------------------------------------------------------
 
 
@@ -501,9 +526,7 @@ def send(body: SendRequest) -> dict[str, Any]:
                 "createdAt": time.time(),
             },
         )
-    for upload_id in body.uploads:
-        for path in (_uploads_dir() / upload_id, _uploads_dir() / f"{upload_id}.json"):
-            path.unlink(missing_ok=True)
+    # Uploads stay until _clean_uploads (a day): after "Undo" the draft still refers to them.
     _start_worker()
     _WAKE.set()
     return {"id": send_id, "sendAt": send_at, "status": "queued"}
