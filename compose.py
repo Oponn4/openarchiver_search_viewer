@@ -532,11 +532,20 @@ def cancel(send_id: str) -> dict[str, Any]:
 def _smtp_send(account: inbox.Account, raw: bytes, envelope: list[str]) -> None:
     server = smtp_server(account)
     context = ssl.create_default_context()
-    if server.starttls:
-        connection: smtplib.SMTP = smtplib.SMTP(server.host, server.port, timeout=SMTP_TIMEOUT_SECONDS)
-        connection.starttls(context=context)
-    else:
-        connection = smtplib.SMTP_SSL(server.host, server.port, timeout=SMTP_TIMEOUT_SECONDS, context=context)
+    # Only connecting is retried: once DATA may have been accepted, a retry could send twice.
+    # Seen 25.10.: one "Network is unreachable" to smtp.gmail.com (no IPv6 route), next try fine.
+    for attempt in range(3):
+        try:
+            if server.starttls:
+                connection: smtplib.SMTP = smtplib.SMTP(server.host, server.port, timeout=SMTP_TIMEOUT_SECONDS)
+                connection.starttls(context=context)
+            else:
+                connection = smtplib.SMTP_SSL(server.host, server.port, timeout=SMTP_TIMEOUT_SECONDS, context=context)
+            break
+        except (OSError, smtplib.SMTPConnectError):
+            if attempt == 2:
+                raise
+            time.sleep(2)
     with connection:
         connection.login(account.username, account.password)
         refused = connection.sendmail(account.name, envelope, raw)
