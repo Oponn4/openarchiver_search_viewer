@@ -436,6 +436,7 @@ def _recipients(values: list[str]) -> list[tuple[str, str]]:
 DATA_IMAGE = re.compile(r'(?i)src\s*=\s*(["\'])data:(image/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)\1')
 
 
+LOCAL_IMAGE = re.compile(r'(?i)<img[^>]+src\s*=\s*["\']?(?:blob:|webkit-fake-url:|file:)')
 INLINE_MAX_BYTES = 1_000_000
 INLINE_MAX_PIXELS = 2048
 
@@ -580,6 +581,9 @@ def send(body: SendRequest) -> dict[str, Any]:
     account = inbox.account_by_id(body.accountId)
     if not _can_send(account):
         raise HTTPException(status_code=409, detail="Sending from this account is not set up yet")
+    # WebKit sometimes keeps a pasted picture only as a placeholder the recipient cannot load.
+    if LOCAL_IMAGE.search(body.html):
+        raise HTTPException(status_code=422, detail="A pasted picture did not come through, please attach it instead")
     message, envelope, reference = _build(body, account)
     raw = message.as_bytes(policy=policy.SMTP)
     if len(raw) > MAX_MESSAGE_BYTES:
