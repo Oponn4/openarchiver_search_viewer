@@ -18,7 +18,9 @@ from __future__ import annotations
 import base64
 import html
 import imaplib
+import io
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -46,6 +48,7 @@ import inbox_m365
 import users
 from inbox_m365 import GraphAccount
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 SEND_DELAY_SECONDS = int(os.environ.get("APPORT_SEND_DELAY_SECONDS", "10"))
@@ -433,6 +436,41 @@ def _recipients(values: list[str]) -> list[tuple[str, str]]:
 DATA_IMAGE = re.compile(r'(?i)src\s*=\s*(["\'])data:(image/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)\1')
 
 
+INLINE_MAX_BYTES = 1_000_000
+INLINE_MAX_PIXELS = 2048
+
+
+def _shrink_inline(content_type: str, data: bytes) -> tuple[str, bytes]:
+    """Big pictures pasted into the text go out at most 2048 px wide or high.
+
+    Small ones (signature logos, icons) stay untouched. Photos become JPEG; PNG and other
+    lossless pictures, usually screenshots, stay PNG so text in them stays sharp. Animated
+    GIFs and anything Pillow cannot read pass through unchanged.
+    """
+    if len(data) <= INLINE_MAX_BYTES or content_type == "image/gif":
+        return content_type, data
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image = ImageOps.exif_transpose(image)
+            photo = content_type in ("image/jpeg", "image/heic", "image/heif", "image/webp") and image.mode != "RGBA"
+            if max(image.size) <= INLINE_MAX_PIXELS and not photo:
+                return content_type, data
+            image.thumbnail((INLINE_MAX_PIXELS, INLINE_MAX_PIXELS), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            if photo:
+                image.convert("RGB").save(output, "JPEG", quality=82, optimize=True)
+                result = ("image/jpeg", output.getvalue())
+            else:
+                image.save(output, "PNG", optimize=True)
+                result = ("image/png", output.getvalue())
+    except Exception:  # noqa: BLE001 - an unreadable picture is sent as it came
+        logger.info("inline image left as is (%s, %d bytes)", content_type, len(data))
+        return content_type, data
+    return result if len(result[1]) < len(data) else (content_type, data)
+
+
 def _with_inline_images(document: str) -> tuple[str, list[tuple[str, str, bytes]]]:
     """data: images (e.g. from a quoted mail) become cid: parts; many clients block data: URLs."""
     images: list[tuple[str, str, bytes]] = []
@@ -443,7 +481,8 @@ def _with_inline_images(document: str) -> tuple[str, list[tuple[str, str, bytes]
         except ValueError:
             return match.group(0)
         cid = make_msgid(domain="apport.local")[1:-1]
-        images.append((cid, match.group(2).lower(), data))
+        content_type, data = _shrink_inline(match.group(2).lower(), data)
+        images.append((cid, content_type, data))
         return f"src={match.group(1)}cid:{cid}{match.group(1)}"
 
     return DATA_IMAGE.sub(replace, document), images
