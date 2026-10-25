@@ -55,6 +55,13 @@ SEND_DELAY_SECONDS = int(os.environ.get("APPORT_SEND_DELAY_SECONDS", "10"))
 SMTP_TIMEOUT_SECONDS = 30
 MAX_UPLOAD_BYTES = 25_000_000
 MAX_MESSAGE_BYTES = 30_000_000
+# Graph sendMail takes at most 4 MB per request, and the MIME goes in base64 (4/3 larger).
+# Bigger mail would need a draft plus upload session; not built yet.
+GRAPH_MAX_MESSAGE_BYTES = 2_900_000
+# Used until the server's own limit (EHLO SIZE) is known.
+FALLBACK_MESSAGE_BYTES = 25_000_000
+SIZE_CACHE_SECONDS = 24 * 3600
+_SIZE_CACHE: dict[tuple[str, int], tuple[int, float]] = {}
 # Drafts on the phone keep referring to their uploads, so these live as long as sent records.
 UPLOAD_KEEP_SECONDS = 7 * 24 * 3600
 OUTBOX_KEEP_SECONDS = 7 * 24 * 3600
@@ -153,9 +160,16 @@ def _can_send(account: inbox.Account | GraphAccount) -> bool:
 def compose_accounts() -> dict[str, Any]:
     accounts = inbox.load_accounts()
     default = _default_account()
+    limits = _size_limits(accounts)
     return {
         "accounts": [
-            {"id": account.id, "address": account.name, "canSend": _can_send(account), **_account_settings(account.name)}
+            {
+                "id": account.id,
+                "address": account.name,
+                "canSend": _can_send(account),
+                "maxMessageBytes": limits[account.id],
+                **_account_settings(account.name),
+            }
             for account in accounts
         ],
         "defaultAccountId": next((account.id for account in accounts if account.name.lower() == default), None),
@@ -586,8 +600,12 @@ def send(body: SendRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="A pasted picture did not come through, please attach it instead")
     message, envelope, reference = _build(body, account)
     raw = message.as_bytes(policy=policy.SMTP)
-    if len(raw) > MAX_MESSAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Mail too large")
+    limit = _size_limits([account])[account.id]
+    if len(raw) > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Mail too large for this account: {len(raw) / 1e6:.1f} MB, at most {limit / 1e6:.1f} MB",
+        )
     send_id = secrets.token_hex(16)
     folder = _outbox_dir()
     (folder / f"{send_id}.eml").write_bytes(raw)
@@ -633,6 +651,48 @@ def cancel(send_id: str) -> dict[str, Any]:
 
 
 # --- Sending -------------------------------------------------------------------------------
+
+
+def _probe_size(server: SmtpServer) -> None:
+    """Asks the SMTP server for its message size limit (EHLO SIZE) without logging in."""
+    try:
+        if server.starttls:
+            connection: smtplib.SMTP = smtplib.SMTP(server.host, server.port, timeout=10)
+            connection.starttls(context=ssl.create_default_context())
+        else:
+            connection = smtplib.SMTP_SSL(server.host, server.port, timeout=10, context=ssl.create_default_context())
+        with connection:
+            connection.ehlo()
+            size = int(connection.esmtp_features.get("size", "0") or 0)
+    except (OSError, smtplib.SMTPException, ValueError):
+        logger.info("no size limit from %s:%s", server.host, server.port)
+        return
+    if size > 0:
+        _SIZE_CACHE[(server.host, server.port)] = (min(size, MAX_MESSAGE_BYTES), time.time())
+
+
+def _size_limits(accounts: list[inbox.Account | GraphAccount]) -> dict[str, int]:
+    """Largest raw message each account may send; unknown or stale limits are fetched in parallel."""
+    servers = {account.id: smtp_server(account) for account in accounts if isinstance(account, inbox.Account)}
+    stale = {
+        (server.host, server.port): server
+        for server in servers.values()
+        if time.time() - _SIZE_CACHE.get((server.host, server.port), (0, 0.0))[1] > SIZE_CACHE_SECONDS
+    }
+    threads = [threading.Thread(target=_probe_size, args=(server,), daemon=True) for server in stale.values()]
+    for thread in threads:
+        thread.start()
+    deadline = time.time() + 12
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.time()))
+    limits = {}
+    for account in accounts:
+        if isinstance(account, inbox.Account):
+            server = servers[account.id]
+            limits[account.id] = _SIZE_CACHE.get((server.host, server.port), (FALLBACK_MESSAGE_BYTES, 0.0))[0]
+        else:
+            limits[account.id] = GRAPH_MAX_MESSAGE_BYTES
+    return limits
 
 
 def _smtp_send(account: inbox.Account, raw: bytes, envelope: list[str]) -> None:
