@@ -9,8 +9,8 @@ but Gmail) get one appended to their Sent folder.
 Sending waits SEND_DELAY_SECONDS in an outbox under APPORT_STATE_DIR first, so "Undo" can stop it.
 The outbox survives a restart: a queued mail is sent when the server is back.
 
-Microsoft 365 cannot send yet: Apport's Entra app has no Mail.Send permission, and asking for it in
-the token refresh before it is granted would break reading that mailbox as well.
+Microsoft 365 sends the same MIME message over Graph (sendMail), once its token carries Mail.Send
+(granted at a new sign-in, see inbox_m365). Graph keeps the Sent copy itself.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 import inbox
+import inbox_m365
 import users
 from inbox_m365 import GraphAccount
 
@@ -130,7 +131,7 @@ class AccountSettings(BaseModel):
 
 
 def _can_send(account: inbox.Account | GraphAccount) -> bool:
-    return isinstance(account, inbox.Account)
+    return isinstance(account, inbox.Account) or inbox_m365.can_send(account)
 
 
 @router.get("/api/compose/accounts")
@@ -410,7 +411,7 @@ def _with_inline_images(document: str) -> tuple[str, list[tuple[str, str, bytes]
     return DATA_IMAGE.sub(replace, document), images
 
 
-def _build(body: SendRequest, account: inbox.Account) -> tuple[EmailMessage, list[str], dict[str, Any] | None]:
+def _build(body: SendRequest, account: inbox.Account | GraphAccount) -> tuple[EmailMessage, list[str], dict[str, Any] | None]:
     to, cc, bcc = _recipients(body.to), _recipients(body.cc), _recipients(body.bcc)
     if not (to or cc or bcc):
         raise HTTPException(status_code=400, detail="No recipient")
@@ -500,7 +501,7 @@ _WAKE = threading.Event()
 @router.post("/api/compose/send")
 def send(body: SendRequest) -> dict[str, Any]:
     account = inbox.account_by_id(body.accountId)
-    if not isinstance(account, inbox.Account):
+    if not _can_send(account):
         raise HTTPException(status_code=409, detail="Sending from this account is not set up yet")
     message, envelope, reference = _build(body, account)
     raw = message.as_bytes(policy=policy.SMTP)
@@ -519,6 +520,7 @@ def send(body: SendRequest) -> dict[str, Any]:
                 "user": users.CURRENT.get(),
                 "accountId": account.id,
                 "envelope": envelope,
+                "bcc": [address for _, address in _recipients(body.bcc)],
                 "reference": reference,
                 "sendAt": send_at,
                 "status": "queued",
@@ -614,9 +616,12 @@ def _deliver(record: dict[str, Any]) -> None:
     raw = (_outbox_dir() / f"{record['id']}.eml").read_bytes()
     try:
         account = inbox.account_by_id(record["accountId"])
-        if not isinstance(account, inbox.Account):
-            raise RuntimeError("account cannot send")
-        _smtp_send(account, raw, record["envelope"])
+        if isinstance(account, GraphAccount):
+            # Graph takes the recipients from the headers; Bcc must be there and is not delivered.
+            bcc = record.get("bcc") or []
+            inbox_m365.send_mime(account, (f"Bcc: {', '.join(bcc)}\r\n".encode() if bcc else b"") + raw)
+        else:
+            _smtp_send(account, raw, record["envelope"])
     except Exception as error:  # noqa: BLE001
         record.update(status="failed", error=str(getattr(error, "detail", error))[:500])
         with _OUTBOX_LOCK:
@@ -626,7 +631,7 @@ def _deliver(record: dict[str, Any]) -> None:
     record.update(status="sent", sentAt=time.time())
     with _OUTBOX_LOCK:
         _write_json(path, record)
-    problems = _after_send(account, raw, record["reference"])
+    problems = _after_send(account, raw, record["reference"]) if isinstance(account, inbox.Account) else []
     if problems:
         record["warnings"] = problems
         with _OUTBOX_LOCK:

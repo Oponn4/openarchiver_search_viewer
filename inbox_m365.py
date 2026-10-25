@@ -27,6 +27,10 @@ from fastapi import HTTPException
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/User.Read offline_access"
+# Sending needs Mail.Send. Asked for only at sign-in (the admin consents there) and in refreshes of
+# tokens that already carry it: a refresh asking for an ungranted scope fails and would lock out
+# reading as well.
+SEND_SCOPES = SCOPES + " https://graph.microsoft.com/Mail.Send"
 HTTP_TIMEOUT_SECONDS = 20
 IMMUTABLE_IDS = {"Prefer": 'IdType="ImmutableId"'}
 # Well-known Graph folder names; they work in every mailbox language.
@@ -78,13 +82,24 @@ def _load_token(account: GraphAccount) -> dict[str, Any] | None:
     return json.loads(_cipher().decrypt(sealed[:12], sealed[12:], account.id.encode()))
 
 
-def _token_from_response(data: dict[str, Any], upn: str) -> dict[str, Any]:
+def _token_from_response(data: dict[str, Any], upn: str, can_send: bool | None = None) -> dict[str, Any]:
+    if can_send is None:
+        can_send = "mail.send" in str(data.get("scope", "")).lower()
     return {
         "access_token": data["access_token"],
         "refresh_token": data["refresh_token"],
         "expires_at": time.time() + int(data.get("expires_in", 3600)),
         "upn": upn,
+        "can_send": can_send,
     }
+
+
+def can_send(account: GraphAccount) -> bool:
+    try:
+        token = _load_token(account)
+    except Exception:  # noqa: BLE001 - unreadable token: cannot send
+        return False
+    return bool(token and token.get("can_send"))
 
 
 _TOKEN_LOCK = threading.Lock()
@@ -104,20 +119,22 @@ def _access_token(account: GraphAccount) -> str:
                 "grant_type": "refresh_token",
                 "client_id": _setting("APPORT_M365_CLIENT_ID"),
                 "refresh_token": token["refresh_token"],
-                "scope": SCOPES,
+                "scope": SEND_SCOPES if token.get("can_send") else SCOPES,
             },
             timeout=HTTP_TIMEOUT_SECONDS,
         )
         data = response.json()
         if "access_token" not in data:
             raise RuntimeError(f"token refresh failed: {data.get('error')}")
-        refreshed = _token_from_response({"refresh_token": token["refresh_token"], **data}, token["upn"])
+        refreshed = _token_from_response({"refresh_token": token["refresh_token"], **data}, token["upn"],
+                                         bool(token.get("can_send")))
         _save_token(account, refreshed)
         return refreshed["access_token"]
 
 
-def _graph(account: GraphAccount, method: str, path: str, **kwargs: Any) -> requests.Response:
-    headers = {"Authorization": f"Bearer {_access_token(account)}", **IMMUTABLE_IDS}
+def _graph(account: GraphAccount, method: str, path: str, headers_extra: dict[str, str] | None = None,
+           **kwargs: Any) -> requests.Response:
+    headers = {"Authorization": f"Bearer {_access_token(account)}", **IMMUTABLE_IDS, **(headers_extra or {})}
     return requests.request(method, f"{GRAPH}{path}", headers=headers, timeout=HTTP_TIMEOUT_SECONDS, **kwargs)
 
 
@@ -130,7 +147,7 @@ _LOGIN_LOCK = threading.Lock()
 def start_login(account: GraphAccount) -> dict[str, Any]:
     response = requests.post(
         f"{_authority()}/devicecode",
-        data={"client_id": _setting("APPORT_M365_CLIENT_ID"), "scope": SCOPES},
+        data={"client_id": _setting("APPORT_M365_CLIENT_ID"), "scope": SEND_SCOPES},
         timeout=HTTP_TIMEOUT_SECONDS,
     )
     code = response.json()
@@ -275,6 +292,14 @@ def raw_message(account: GraphAccount, graph_id: str) -> bytes:
     if response.status_code >= 300:
         raise HTTPException(status_code=502, detail=f"Graph message failed: {response.status_code}")
     return response.content
+
+
+def send_mime(account: GraphAccount, raw: bytes) -> None:
+    """Sends a finished MIME message; Graph files the copy in Sent Items itself."""
+    response = _graph(account, "POST", "/me/sendMail", data=base64.b64encode(raw),
+                      headers_extra={"Content-Type": "text/plain"})
+    if response.status_code != 202:
+        raise RuntimeError(f"Graph sendMail failed: {response.status_code} {response.text[:200]}")
 
 
 def act(account: GraphAccount, graph_id: str, action: str) -> dict[str, Any]:
