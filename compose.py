@@ -54,7 +54,8 @@ router = APIRouter()
 SEND_DELAY_SECONDS = int(os.environ.get("APPORT_SEND_DELAY_SECONDS", "10"))
 SMTP_TIMEOUT_SECONDS = 30
 MAX_UPLOAD_BYTES = 25_000_000
-MAX_MESSAGE_BYTES = 30_000_000
+# Only a guard against runaway mail: no provider here takes more (GMX says 141 MB, few receive that).
+MAX_MESSAGE_BYTES = 60_000_000
 # Graph sendMail takes at most 4 MB per request, and the MIME goes in base64 (4/3 larger).
 # Bigger mail would need a draft plus upload session; not built yet.
 GRAPH_MAX_MESSAGE_BYTES = 2_900_000
@@ -600,12 +601,9 @@ def send(body: SendRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="A pasted picture did not come through, please attach it instead")
     message, envelope, reference = _build(body, account)
     raw = message.as_bytes(policy=policy.SMTP)
-    limit = _size_limits([account])[account.id]
-    if len(raw) > limit:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Mail too large for this account: {len(raw) / 1e6:.1f} MB, at most {limit / 1e6:.1f} MB",
-        )
+    # The app warns and asks before sending past the account's limit; the provider has the last word.
+    if len(raw) > MAX_MESSAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Mail too large")
     send_id = secrets.token_hex(16)
     folder = _outbox_dir()
     (folder / f"{send_id}.eml").write_bytes(raw)
@@ -668,7 +666,7 @@ def _probe_size(server: SmtpServer) -> None:
         logger.info("no size limit from %s:%s", server.host, server.port)
         return
     if size > 0:
-        _SIZE_CACHE[(server.host, server.port)] = (min(size, MAX_MESSAGE_BYTES), time.time())
+        _SIZE_CACHE[(server.host, server.port)] = (size, time.time())
 
 
 def _size_limits(accounts: list[inbox.Account | GraphAccount]) -> dict[str, int]:
