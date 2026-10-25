@@ -452,6 +452,7 @@ DATA_IMAGE = re.compile(r'(?i)src\s*=\s*(["\'])data:(image/[a-z0-9.+-]+);base64,
 
 
 LOCAL_IMAGE = re.compile(r'(?i)<img[^>]+src\s*=\s*["\']?(?:blob:|webkit-fake-url:|file:)')
+IMG_WITHOUT_STYLE = re.compile(r"(?i)<img(?![^>]*\bstyle\s*=)([\s>/])")
 INLINE_MAX_BYTES = 1_000_000
 INLINE_MAX_PIXELS = 2048
 
@@ -542,8 +543,11 @@ def _build(body: SendRequest, account: inbox.Account | GraphAccount) -> tuple[Em
             message["References"] = " ".join([*chain, parent][-20:])
 
     text = new_text + ("\n\n" + quote_text if quote_text else "")
+    # Pasted photos carry their full pixel width; without this they open zoomed in.
+    new_html = IMG_WITHOUT_STYLE.sub(r'<img style="max-width:100%;height:auto"\1', new_html)
     document, images = _with_inline_images(
-        '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>'
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        "<style>img{max-width:100%;height:auto}</style></head><body>"
         f'<div dir="auto">{new_html}</div>{quote_html}</body></html>'
     )
     message.set_content(text)
