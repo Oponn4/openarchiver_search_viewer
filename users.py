@@ -75,11 +75,13 @@ def multi_user() -> bool:
     return bool(load())
 
 
-def allowed(account_name: str) -> bool:
+def allowed(account_name: str, user: str | None = None) -> bool:
+    """May the current user (or `user`) see this account?"""
     users = load()
     if not users:
         return True
-    user = CURRENT.get()
+    if user is None:
+        user = CURRENT.get()
     entry = users.get(user or "")
     # Fail closed: with users configured, a request without a known user sees nothing.
     if entry is None:
@@ -99,6 +101,30 @@ def source_ids() -> list[str] | None:
     with psycopg.connect(url, connect_timeout=5) as conn:
         rows = conn.execute("select id, name from ingestion_sources").fetchall()
     return [str(source_id) for source_id, name in rows if allowed(name)]
+
+
+def _source_rows() -> list[tuple[str, str]]:
+    url = os.environ.get("OA_DATABASE_URL", "")
+    with psycopg.connect(url, connect_timeout=5) as conn:
+        return [(str(i), n) for i, n in conn.execute("select id, name from ingestion_sources").fetchall()]
+
+
+def visible_accounts() -> set[str]:
+    """Lower-case names of the mail accounts the current user sees."""
+    return {name.lower() for _, name in _source_rows() if allowed(name)}
+
+
+def shared_accounts() -> set[str]:
+    """Accounts more than one user sees (e.g. a joint mailbox); empty without users.json."""
+    names = list(load())
+    if len(names) < 2:
+        return set()
+    return {name.lower() for _, name in _source_rows() if sum(allowed(name, user) for user in names) > 1}
+
+
+def source_names() -> dict[str, str]:
+    """Open Archiver source id -> lower-case account name."""
+    return {source_id: name.lower() for source_id, name in _source_rows()}
 
 
 def state_name(base: str) -> str:

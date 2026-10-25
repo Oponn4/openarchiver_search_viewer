@@ -4,6 +4,10 @@ Zahlen aus der OA-Datenbank, der Abmeldeweg aus dem List-Unsubscribe-Header der 
 letzten Mail eines Absenders (die .eml liegt nur lesbar unter APPORT_ARCHIVE_DIR). Gruppiert
 nach Domain, bei Freemailern nach Adresse. Abmeldungen merkt sich das Backend in
 APPORT_STATE_DIR, damit sichtbar wird, wer danach trotzdem weiterschickt.
+
+Abmelden und Ausblenden gelten je Benutzer, außer der Absender schreibt (auch) an ein Konto, das
+mehrere Benutzer sehen (sotjan@): dann steht die Markierung in newsletters-shared.json und gilt
+für jeden, der dieses Konto sieht. Sonst meldet einer ab und der andere sieht es weiter offen.
 """
 
 from __future__ import annotations
@@ -104,7 +108,8 @@ def _rows() -> list[tuple[Any, ...]]:
                count(distinct coalesce(message_id_header, id::text))
                    filter (where sent_at > now() - interval '30 days'),
                max(sent_at),
-               (array_agg(storage_path order by sent_at desc))[1]
+               (array_agg(storage_path order by sent_at desc))[1],
+               array_agg(distinct ingestion_source_id::text)
         from archived_emails
         where sent_at > now() - interval '12 months' {condition}
         group by 1
@@ -144,9 +149,13 @@ def _ms(value: datetime | None) -> int | None:
 def build() -> dict[str, Any]:
     groups: dict[str, dict[str, Any]] = {}
     addresses: dict[str, set[str]] = {}
-    for address, name, count, count30, last, path in _rows():
+    # Konten, an die eine Gruppe schreibt: entscheidet, ob ihre Markierung geteilt wird.
+    accounts: dict[str, set[str]] = {}
+    names = users.source_names()
+    for address, name, count, count30, last, path, sources in _rows():
         key = group_key(address)
         addresses.setdefault(key, set()).add(address)
+        accounts.setdefault(key, set()).update(names.get(source, "") for source in sources or [])
         group = groups.setdefault(key, {"key": key, "count": 0, "count30": 0, "last": None, "candidates": []})
         group["count"] += count
         group["count30"] += count30
@@ -177,7 +186,7 @@ def build() -> dict[str, Any]:
             })
             break
     senders.sort(key=lambda sender: sender["count"], reverse=True)
-    return {"generatedAt": int(time.time() * 1000), "senders": senders, "addresses": addresses}
+    return {"generatedAt": int(time.time() * 1000), "senders": senders, "addresses": addresses, "accounts": accounts}
 
 
 def _cached(refresh: bool) -> dict[str, Any]:
@@ -189,11 +198,76 @@ def _cached(refresh: bool) -> dict[str, Any]:
         return cache
 
 
+# --- Geteilte Markierungen (gemeinsame Konten) ---------------------------------------------
+
+KINDS = ("unsubscribed", "hidden")
+
+
+def _shared_file() -> Path:
+    return Path(os.environ.get("APPORT_STATE_DIR", "/data")) / "newsletters-shared.json"
+
+
+def _load_shared() -> dict[str, dict[str, dict[str, Any]]]:
+    try:
+        data = json.loads(_shared_file().read_text())
+    except (OSError, ValueError):
+        data = {}
+    return {kind: data.get(kind, {}) for kind in KINDS}
+
+
+def _save_shared(data: dict[str, dict[str, dict[str, Any]]]) -> None:
+    path = _shared_file()
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    temporary.replace(path)
+
+
+def _shared_accounts_of(key: str) -> list[str]:
+    """Gemeinsame Konten, an die diese Absendergruppe schreibt (leer: Markierung bleibt privat)."""
+    shared = users.shared_accounts()
+    if not shared:
+        return []
+    return sorted(_cached(False)["accounts"].get(key, set()) & shared)
+
+
+def _effective(kind: str) -> dict[str, dict[str, Any]]:
+    """Eigene Markierungen plus geteilte für Konten, die der Benutzer sieht."""
+    marks = _load_marks(kind)
+    shared = _load_shared()[kind]
+    if shared:
+        visible = users.visible_accounts()
+        for key, mark in shared.items():
+            if set(mark.get("accounts", [])) & visible:
+                marks.setdefault(key, mark)
+    return marks
+
+
+def _set_mark(kind: str, key: str, mark: dict[str, Any] | None) -> None:
+    """Setzt oder entfernt eine Markierung, geteilt oder privat je nach Konten der Gruppe."""
+    accounts = _shared_accounts_of(key) if mark is not None else []
+    visible = users.visible_accounts() if mark is None else set()
+    with _LOCK:
+        own = _load_marks(kind)
+        shared = _load_shared()
+        if mark is None:
+            own.pop(key, None)
+            entry = shared[kind].get(key)
+            if entry and set(entry.get("accounts", [])) & visible:
+                shared[kind].pop(key)
+        elif accounts:
+            shared[kind][key] = {**mark, "accounts": accounts, "by": users.CURRENT.get()}
+            own.pop(key, None)
+        else:
+            own[key] = mark
+        _save_marks(own, kind)
+        _save_shared(shared)
+
+
 @router.get("/api/newsletters")
 def newsletters(refresh: bool = False) -> dict[str, Any]:
     data = _cached(refresh)
-    marks = _load_marks()
-    hidden_marks = _load_marks("hidden")
+    marks = _effective("unsubscribed")
+    hidden_marks = _effective("hidden")
     since = _since(data["addresses"], marks)
     active, done, hidden = [], [], []
     for sender in data["senders"]:
@@ -218,10 +292,7 @@ def newsletters(refresh: bool = False) -> dict[str, Any]:
 
 def remember(address: str, name: str) -> None:
     key = group_key(address)
-    with _LOCK:
-        marks = _load_marks()
-        marks[key] = {"at": int(time.time() * 1000), "name": name, "address": address.strip().lower()}
-        _save_marks(marks)
+    _set_mark("unsubscribed", key, {"at": int(time.time() * 1000), "name": name, "address": address.strip().lower()})
 
 
 class Mark(BaseModel):
@@ -240,29 +311,20 @@ def mark(body: Mark) -> dict[str, Any]:
 
 @router.delete("/api/newsletters/mark/{key}")
 def unmark(key: str) -> dict[str, Any]:
-    with _LOCK:
-        marks = _load_marks()
-        marks.pop(key, None)
-        _save_marks(marks)
+    _set_mark("unsubscribed", key, None)
     return {"ok": True}
 
 
 @router.post("/api/newsletters/hide/{key}")
 def hide(key: str) -> dict[str, Any]:
     """Aus der Liste nehmen, ohne abzumelden: bei Spam bestätigt ein Abmeldeklick nur die Adresse."""
-    with _LOCK:
-        marks = _load_marks("hidden")
-        marks[key] = {"at": int(time.time() * 1000)}
-        _save_marks(marks, "hidden")
+    _set_mark("hidden", key, {"at": int(time.time() * 1000)})
     return {"ok": True}
 
 
 @router.delete("/api/newsletters/hide/{key}")
 def unhide(key: str) -> dict[str, Any]:
-    with _LOCK:
-        marks = _load_marks("hidden")
-        marks.pop(key, None)
-        _save_marks(marks, "hidden")
+    _set_mark("hidden", key, None)
     return {"ok": True}
 
 
