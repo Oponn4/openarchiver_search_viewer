@@ -52,7 +52,8 @@ SEND_DELAY_SECONDS = int(os.environ.get("APPORT_SEND_DELAY_SECONDS", "10"))
 SMTP_TIMEOUT_SECONDS = 30
 MAX_UPLOAD_BYTES = 25_000_000
 MAX_MESSAGE_BYTES = 30_000_000
-UPLOAD_KEEP_SECONDS = 24 * 3600
+# Drafts on the phone keep referring to their uploads, so these live as long as sent records.
+UPLOAD_KEEP_SECONDS = 7 * 24 * 3600
 OUTBOX_KEEP_SECONDS = 7 * 24 * 3600
 MODES = {"new", "reply", "replyAll", "forward"}
 
@@ -108,15 +109,26 @@ def _settings_file() -> Path:
     return _state_dir() / f"{users.state_name('compose')}.json"
 
 
-def _settings() -> dict[str, dict[str, Any]]:
+def _settings() -> dict[str, Any]:
     try:
         return json.loads(_settings_file().read_text())
     except (OSError, ValueError):
         return {}
 
 
+DEFAULT_KEY = "_defaultAccount"
+
+
+def _default_account() -> str:
+    """Address of the account a new mail starts with; empty means the first that can send."""
+    value = _settings().get(DEFAULT_KEY, "")
+    return value if isinstance(value, str) else ""
+
+
 def _account_settings(account_name: str) -> dict[str, Any]:
     entry = _settings().get(account_name.lower(), {})
+    if not isinstance(entry, dict):
+        entry = {}
     return {
         "name": entry.get("name", ""),
         "signature": entry.get("signature", ""),
@@ -136,13 +148,31 @@ def _can_send(account: inbox.Account | GraphAccount) -> bool:
 
 @router.get("/api/compose/accounts")
 def compose_accounts() -> dict[str, Any]:
+    accounts = inbox.load_accounts()
+    default = _default_account()
     return {
         "accounts": [
             {"id": account.id, "address": account.name, "canSend": _can_send(account), **_account_settings(account.name)}
-            for account in inbox.load_accounts()
+            for account in accounts
         ],
+        "defaultAccountId": next((account.id for account in accounts if account.name.lower() == default), None),
         "sendDelaySeconds": SEND_DELAY_SECONDS,
     }
+
+
+class DefaultAccount(BaseModel):
+    accountId: str | None = None
+
+
+@router.put("/api/compose/default")
+def save_default_account(body: DefaultAccount) -> dict[str, Any]:
+    settings = _settings()
+    if body.accountId:
+        settings[DEFAULT_KEY] = inbox.account_by_id(body.accountId).name.lower()
+    else:
+        settings.pop(DEFAULT_KEY, None)
+    _write_json(_settings_file(), settings)
+    return {"ok": True}
 
 
 @router.put("/api/compose/accounts/{account_id}")
@@ -284,7 +314,15 @@ def compose_start(item: str, mode: str, box: str = "inbox") -> dict[str, Any]:
     if mode == "forward":
         for index, part in enumerate(inbox._attachment_parts(message)):
             data = part.get_payload(decode=True) or b""
-            attachments.append({"index": index, "filename": part.get_filename() or f"Anhang {index + 1}", "sizeBytes": len(data)})
+            filename = part.get_filename() or f"Anhang {index + 1}"
+            attachments.append({
+                "index": index,
+                "filename": filename,
+                "sizeBytes": len(data),
+                "mimeType": inbox._viewer().normalized_mime_type(filename, part.get_content_type(), data),
+                # Same route the mail view uses, so the phone can preview before forwarding.
+                "viewUrl": f"/api/{box}/{item}/attachments/{index}",
+            })
     subject = str(message.get("Subject", ""))
     return {
         "accountId": account.id,
