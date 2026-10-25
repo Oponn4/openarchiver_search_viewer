@@ -40,7 +40,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import psycopg
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 import inbox
@@ -422,6 +422,20 @@ def _load_upload(upload_id: str) -> tuple[str, str, bytes]:
     return meta["filename"], meta["contentType"], data
 
 
+@router.get("/api/compose/uploads/{upload_id}")
+def get_upload(upload_id: str) -> Response:
+    """The added file once more, so the phone can preview what it attached."""
+    filename, content_type, data = _load_upload(upload_id)
+    viewer = inbox._viewer()
+    mime_type = viewer.normalized_mime_type(filename, content_type, data)
+    active = viewer.is_active_attachment(filename, mime_type)
+    headers = {
+        "Content-Disposition": viewer.content_disposition(filename.replace('"', "'"), "attachment" if active else "inline"),
+        "X-Content-Type-Options": "nosniff",
+    }
+    return Response(content=data, media_type="application/octet-stream" if active else mime_type, headers=headers)
+
+
 # --- Building and queueing the mail --------------------------------------------------------
 
 
@@ -431,7 +445,8 @@ class SendRequest(BaseModel):
     cc: list[str] = []
     bcc: list[str] = []
     subject: str = Field("", max_length=1000)
-    html: str = Field("", max_length=5_000_000)
+    # Pasted photos travel inside the HTML as base64 until the server shrinks them.
+    html: str = Field("", max_length=MAX_MESSAGE_BYTES)
     mode: str = "new"
     item: str | None = None
     box: str = "inbox"
