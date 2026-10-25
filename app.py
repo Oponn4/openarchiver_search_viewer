@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 import inbox
 import spam
+import compose
 import logos
 import newsletters
 import users
@@ -1151,6 +1152,7 @@ app.include_router(inbox.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(logos.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(newsletters.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(spam.router, dependencies=[Depends(verify_api_auth)])
+app.include_router(compose.router, dependencies=[Depends(verify_api_auth)])
 
 
 @app.get("/api/search", dependencies=[Depends(verify_api_auth)])
