@@ -30,6 +30,7 @@ import spam
 import compose
 import logos
 import newsletters
+import push
 import users
 
 
@@ -1153,6 +1154,13 @@ app.include_router(logos.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(newsletters.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(spam.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(compose.router, dependencies=[Depends(verify_api_auth)])
+app.include_router(push.router, dependencies=[Depends(verify_api_auth)])
+
+
+@app.on_event("startup")
+def start_push() -> None:
+    # Watches the inboxes of users with a registered device and sends new mail to their devices.
+    push.start()
 
 
 @app.get("/api/search", dependencies=[Depends(verify_api_auth)])
