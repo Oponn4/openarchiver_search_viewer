@@ -468,8 +468,16 @@ DATA_IMAGE = re.compile(r'(?i)src\s*=\s*(["\'])data:(image/[a-z0-9.+-]+);base64,
 
 LOCAL_IMAGE = re.compile(r'(?i)<img[^>]+src\s*=\s*["\']?(?:blob:|webkit-fake-url:|file:)')
 IMG_WITHOUT_STYLE = re.compile(r"(?i)<img(?![^>]*\bstyle\s*=)([\s>/])")
+TABLE_WITHOUT_STYLE = re.compile(r"(?i)<table(?![^>]*\bstyle\s*=)([\s>/])")
+CELL_WITHOUT_STYLE = re.compile(r"(?i)<(td|th)(?![^>]*\bstyle\s*=)([\s>/])")
 INLINE_MAX_BYTES = 1_000_000
 INLINE_MAX_PIXELS = 2048
+
+
+def _table_text(text: str) -> str:
+    """One line per table row, cells separated by a dash, for the plain-text part."""
+    text = re.sub(r"(?i)</t[dh]\s*>\s*(?=<t[dh]\b)", " – ", text)
+    return re.sub(r"(?i)</tr\s*>", "</tr><br>", text)
 
 
 def _shrink_inline(content_type: str, data: bytes) -> tuple[str, bytes]:
@@ -528,7 +536,7 @@ def _build(body: SendRequest, account: inbox.Account | GraphAccount) -> tuple[Em
         raise HTTPException(status_code=400, detail="Unknown mode")
     viewer = inbox._viewer()
     new_html = viewer.sanitize_mail_html(body.html)
-    new_text = viewer.html_to_text(re.sub(r"(?i)</div\s*>", "</div><br>", new_html))
+    new_text = viewer.html_to_text(_table_text(re.sub(r"(?i)</div\s*>", "</div><br>", new_html)))
     quote_html, quote_text = "", ""
     original = None
     reference: dict[str, Any] | None = None
@@ -560,6 +568,8 @@ def _build(body: SendRequest, account: inbox.Account | GraphAccount) -> tuple[Em
     text = new_text + ("\n\n" + quote_text if quote_text else "")
     # Pasted photos carry their full pixel width; without this they open zoomed in.
     new_html = IMG_WITHOUT_STYLE.sub(r'<img style="max-width:100%;height:auto"\1', new_html)
+    new_html = TABLE_WITHOUT_STYLE.sub(r'<table style="border-collapse:collapse"\1', new_html)
+    new_html = CELL_WITHOUT_STYLE.sub(r'<\1 style="border:1px solid #c7c7cc;padding:4px 8px;vertical-align:top"\2', new_html)
     document, images = _with_inline_images(
         '<!DOCTYPE html><html><head><meta charset="utf-8">'
         "<style>img{max-width:100%;height:auto}</style></head><body>"
