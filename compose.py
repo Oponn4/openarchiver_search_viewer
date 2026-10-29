@@ -206,7 +206,7 @@ def save_account_settings(account_id: str, body: AccountSettings) -> dict[str, A
 
 
 def _original(item_id: str, box: str) -> tuple[inbox.Account | GraphAccount, Any]:
-    if box not in ("inbox", "spam"):
+    if box not in ("inbox", "spam", "sent"):
         raise HTTPException(status_code=400, detail="Unknown box")
     account, payload = inbox._raw(item_id, box)
     return account, BytesParser(policy=policy.default).parsebytes(payload)

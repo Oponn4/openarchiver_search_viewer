@@ -68,7 +68,10 @@ FALLBACK_FOLDERS = {
     "delete": ["Trash", "Papierkorb", "Gelöscht", "Deleted Messages", "Deleted Items", "Gelöschte Elemente"],
     # iCloud has "Junk" and an old "Junk E-mail"; the first match wins, so the real one goes first.
     "spam": ["Junk", "Spam", "Spamverdacht", "Junk E-mail", "Junk-E-Mail", "INBOX/Spam", "Bulk Mail"],
+    "sent": ["Sent", "Gesendet", "Gesendete Objekte", "Gesendete Elemente", "Sent Messages", "Sent Items", "INBOX.Sent"],
 }
+# Special-use flag behind each box other than the inbox.
+BOX_FLAGS = {"spam": "\\junk", "sent": "\\sent"}
 # Spam listings also carry the server's verdict on the sender, to tell a spoofed From apart.
 SPAM_HEADER_FIELDS = f"{HEADER_FIELDS} AUTHENTICATION-RESULTS"
 
@@ -301,6 +304,8 @@ def _parse_fetch(data: list[Any]) -> list[dict[str, Any]]:
                 "date": date_value,
                 "message_id": str(headers.get("Message-ID", "")).strip(),
                 "references": _references(headers),
+                # Shown instead of the sender in the Sent list.
+                "to": [{"name": name, "address": address} for name, address in getaddresses([str(headers.get("To", ""))]) if address],
                 # Only fetched for spam: the receiving server found the From domain forged.
                 "auth_failed": bool(re.search(r"\bdmarc=fail\b", str(headers.get("Authentication-Results", "")), re.I)),
             }
@@ -322,16 +327,18 @@ def _references(headers: Any) -> list[str]:
 
 
 def mailbox_name(conn: imaplib.IMAP4, box: str) -> str:
-    """Folder behind a box: "inbox" or "spam" (special-use \\Junk, else a known name)."""
+    """Folder behind a box: "inbox", "spam" or "sent" (special-use flag, else a known name)."""
     if box == "inbox":
         return "INBOX"
+    if box not in BOX_FLAGS:
+        raise HTTPException(status_code=400, detail="Unknown box")
     folders = special_folders(conn)
-    target = folders.get("\\junk")
+    target = folders.get(BOX_FLAGS[box])
     if not target:
         existing = set(folders.get("\\x-names", "").split("\n"))
-        target = next((name for name in FALLBACK_FOLDERS["spam"] if name in existing), None)
+        target = next((name for name in FALLBACK_FOLDERS[box] if name in existing), None)
     if not target:
-        raise HTTPException(status_code=409, detail="No spam folder on this account")
+        raise HTTPException(status_code=409, detail=f"No {box} folder on this account")
     return target
 
 

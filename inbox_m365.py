@@ -35,7 +35,7 @@ HTTP_TIMEOUT_SECONDS = 20
 IMMUTABLE_IDS = {"Prefer": 'IdType="ImmutableId"'}
 # Well-known Graph folder names; they work in every mailbox language.
 TARGET_FOLDERS = {"archive": "archive", "delete": "deleteditems", "notspam": "inbox"}
-FOLDERS = {"inbox": "inbox", "spam": "junkemail"}
+FOLDERS = {"inbox": "inbox", "spam": "junkemail", "sent": "sentitems"}
 
 
 @dataclass(frozen=True)
@@ -243,7 +243,7 @@ def fetch_inbox(account: GraphAccount, limit: int, box: str = "inbox") -> dict[s
         params={
             "$top": str(limit),
             "$orderby": "receivedDateTime desc",
-            "$select": "id,subject,from,receivedDateTime,isRead,flag,internetMessageId,conversationId",
+            "$select": "id,subject,from,toRecipients,receivedDateTime,isRead,flag,internetMessageId,conversationId",
         },
     )
     if listing.status_code != 200:
@@ -268,6 +268,11 @@ def fetch_inbox(account: GraphAccount, limit: int, box: str = "inbox") -> dict[s
                 # Graph has no References in the listing; its conversation id groups the thread.
                 "references": [],
                 "conversation_id": item.get("conversationId", ""),
+                "to": [
+                    {"name": (entry.get("emailAddress") or {}).get("name", ""), "address": (entry.get("emailAddress") or {}).get("address", "")}
+                    for entry in item.get("toRecipients") or []
+                    if (entry.get("emailAddress") or {}).get("address")
+                ],
                 "auth_failed": False,
             }
         )

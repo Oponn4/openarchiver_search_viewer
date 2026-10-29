@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import inbox
+import sent
 import spam
 import compose
 import logos
@@ -356,7 +357,7 @@ async def current_user(request: Request, call_next):
     # Set before call_next: the endpoint runs in a copy of this context and sees the user.
     user = SESSION_USERS.get(request.cookies.get("auth_token") or "")
     users.CURRENT.set(user)
-    if request.url.path in ("/api/inbox", "/api/spam", "/api/newsletters") and user is None and users.multi_user():
+    if request.url.path in ("/api/inbox", "/api/spam", "/api/sent", "/api/newsletters") and user is None and users.multi_user():
         print(f"no user for {request.url.path}: cookie {'set' if request.cookies.get('auth_token') else 'missing'}", flush=True)
     return await call_next(request)
 
@@ -1153,6 +1154,7 @@ app.include_router(inbox.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(logos.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(newsletters.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(spam.router, dependencies=[Depends(verify_api_auth)])
+app.include_router(sent.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(compose.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(push.router, dependencies=[Depends(verify_api_auth)])
 
