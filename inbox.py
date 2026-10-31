@@ -496,6 +496,16 @@ def _forget_cached(item_id: str) -> None:
     _record_change(item_id, "gone")
 
 
+def expire_cached(account_id: str) -> None:
+    """Mark an account's cached inbox as old: a mail moved in from elsewhere is not in it yet, so
+    the next listing waits for a fresh fetch (up to INBOX_DEADLINE_SECONDS) instead."""
+    with _LOCK:
+        cached = _CACHE.get(account_id)
+        # Just past fresh, not zero: the inbox shows the age of a cached result.
+        if cached and time.time() - cached[0] < INBOX_FRESH_SECONDS:
+            _CACHE[account_id] = (time.time() - INBOX_FRESH_SECONDS, cached[1])
+
+
 def _set_cached_seen(item_id: str, seen: bool) -> None:
     _record_change(item_id, "seen" if seen else "unseen")
 

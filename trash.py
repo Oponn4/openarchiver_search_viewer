@@ -81,14 +81,18 @@ def trash_action(item_id: str, action: str) -> dict[str, Any]:
         account = inbox.account_by_id(account_id)
         if not isinstance(account, GraphAccount):
             raise HTTPException(status_code=400, detail="Malformed message id")
-        return inbox_m365.act(account, inbox_m365.decode_id(encoded), action)
+        result = inbox_m365.act(account, inbox_m365.decode_id(encoded), action)
+        inbox.expire_cached(account_id)
+        return result
     account_id, uidvalidity, uid = inbox._split_item_id(item_id)
     account = inbox.account_by_id(account_id)
     if isinstance(account, GraphAccount):
         raise HTTPException(status_code=400, detail="Malformed message id")
     for attempt in (1, 2):
         try:
-            return inbox._imap_action(account, item_id, uidvalidity, uid, action, "trash")
+            result = inbox._imap_action(account, item_id, uidvalidity, uid, action, "trash")
+            inbox.expire_cached(account_id)
+            return result
         except (TimeoutError, OSError, imaplib.IMAP4.abort) as error:
             if attempt == 2:
                 raise HTTPException(status_code=504, detail=f"Mailbox did not answer in time ({type(error).__name__})")
