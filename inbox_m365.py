@@ -34,8 +34,8 @@ SEND_SCOPES = SCOPES + " https://graph.microsoft.com/Mail.Send"
 HTTP_TIMEOUT_SECONDS = 20
 IMMUTABLE_IDS = {"Prefer": 'IdType="ImmutableId"'}
 # Well-known Graph folder names; they work in every mailbox language.
-TARGET_FOLDERS = {"archive": "archive", "delete": "deleteditems", "notspam": "inbox"}
-FOLDERS = {"inbox": "inbox", "spam": "junkemail", "sent": "sentitems"}
+TARGET_FOLDERS = {"archive": "archive", "delete": "deleteditems", "notspam": "inbox", "restore": "inbox"}
+FOLDERS = {"inbox": "inbox", "spam": "junkemail", "sent": "sentitems", "trash": "deleteditems"}
 
 
 @dataclass(frozen=True)
@@ -242,7 +242,8 @@ def fetch_inbox(account: GraphAccount, limit: int, box: str = "inbox") -> dict[s
         f"/me/mailFolders/{name}/messages",
         params={
             "$top": str(limit),
-            "$orderby": "receivedDateTime desc",
+            # Trash: last moved in first, so a fresh mistake is never cut off by the limit.
+            "$orderby": "lastModifiedDateTime desc" if box == "trash" else "receivedDateTime desc",
             "$select": "id,subject,from,toRecipients,receivedDateTime,isRead,flag,internetMessageId,conversationId",
         },
     )

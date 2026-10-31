@@ -70,8 +70,9 @@ FALLBACK_FOLDERS = {
     "spam": ["Junk", "Spam", "Spamverdacht", "Junk E-mail", "Junk-E-Mail", "INBOX/Spam", "Bulk Mail"],
     "sent": ["Sent", "Gesendet", "Gesendete Objekte", "Gesendete Elemente", "Sent Messages", "Sent Items", "INBOX.Sent"],
 }
+FALLBACK_FOLDERS["trash"] = FALLBACK_FOLDERS["delete"]
 # Special-use flag behind each box other than the inbox.
-BOX_FLAGS = {"spam": "\\junk", "sent": "\\sent"}
+BOX_FLAGS = {"spam": "\\junk", "sent": "\\sent", "trash": "\\trash"}
 # Spam listings also carry the server's verdict on the sender, to tell a spoofed From apart.
 SPAM_HEADER_FIELDS = f"{HEADER_FIELDS} AUTHENTICATION-RESULTS"
 
@@ -327,7 +328,7 @@ def _references(headers: Any) -> list[str]:
 
 
 def mailbox_name(conn: imaplib.IMAP4, box: str) -> str:
-    """Folder behind a box: "inbox", "spam" or "sent" (special-use flag, else a known name)."""
+    """Folder behind a box: "inbox", "spam", "sent" or "trash" (special-use flag, else a known name)."""
     if box == "inbox":
         return "INBOX"
     if box not in BOX_FLAGS:
@@ -593,7 +594,8 @@ def _imap_action(
             raise HTTPException(status_code=404, detail=f"Message is no longer in {folder}")
         if box != "inbox":
             # Out of spam: "notspam" back to the inbox (Gmail learns from that), "delete" to trash.
-            target = "INBOX" if action == "notspam" else _target_folder(conn, "delete")
+            # Out of trash: "restore" back to the inbox.
+            target = "INBOX" if action in ("notspam", "restore") else _target_folder(conn, "delete")
             _move(conn, uid, target)
             return {"ok": True, "moved_to": target}
         if action == "read":
