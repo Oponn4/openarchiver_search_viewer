@@ -244,7 +244,7 @@ def fetch_inbox(account: GraphAccount, limit: int, box: str = "inbox") -> dict[s
             "$top": str(limit),
             # Trash: last moved in first, so a fresh mistake is never cut off by the limit.
             "$orderby": "lastModifiedDateTime desc" if box == "trash" else "receivedDateTime desc",
-            "$select": "id,subject,from,toRecipients,receivedDateTime,isRead,flag,internetMessageId,conversationId",
+            "$select": "id,subject,from,toRecipients,receivedDateTime,lastModifiedDateTime,isRead,flag,internetMessageId,conversationId",
         },
     )
     if listing.status_code != 200:
@@ -275,6 +275,8 @@ def fetch_inbox(account: GraphAccount, limit: int, box: str = "inbox") -> dict[s
                     if (entry.get("emailAddress") or {}).get("address")
                 ],
                 "auth_failed": False,
+                # Trash only: when it was moved there (any later change moves it, too).
+                **({"deleted_at": _iso(item.get("lastModifiedDateTime"))} if box == "trash" else {}),
             }
         )
     counts = folder.json()
@@ -324,4 +326,13 @@ def act(account: GraphAccount, graph_id: str, action: str) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"Graph {action} failed: {response.status_code}")
     if action in ("read", "unread"):
         return {"ok": True}
-    return {"ok": True, "moved_to": TARGET_FOLDERS[action]}
+    result: dict[str, Any] = {"ok": True, "moved_to": TARGET_FOLDERS[action]}
+    # A move answers with the message as it is now, under a new id; the app needs it to undo a delete.
+    if action == "delete":
+        try:
+            moved_id = response.json().get("id")
+        except ValueError:
+            moved_id = None
+        if moved_id:
+            result["trash_id"] = f"{account.id}:graph:{_encode_id(moved_id)}"
+    return result

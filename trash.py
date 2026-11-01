@@ -3,7 +3,8 @@
 A swipe deletes at once, without asking; until now Apple Mail was the only way back. The folders
 are read live (IMAP \\Trash or a known folder name, Graph "deleteditems"). Each account contributes
 the mails it moved to the trash last, so a fresh mistake is always in the list even when the trash
-holds thousands. "restore" moves a mail back to the inbox. Gmail empties the trash after 30 days.
+holds thousands. Sorted by deletion time: Graph has it, for IMAP deletions.py knows the ones
+deleted through Apport. "restore" moves a mail back to the inbox. Gmail empties the trash after 30 days.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
+import deletions
 import inbox
 import inbox_m365
 from inbox_m365 import GraphAccount
@@ -49,7 +51,13 @@ def get_trash(limit: int = Query(50, ge=1, le=inbox.MAX_LIMIT)) -> dict[str, Any
             results.append(future.result())
 
     messages = [message for result in results for message in result["messages"]]
-    messages.sort(key=lambda m: m.get("date") or "", reverse=True)
+    known = deletions.deleted_at([m["id"] for m in messages if "deleted_at" not in m])
+    for message in messages:
+        if message["id"] in known:
+            message["deleted_at"] = known[message["id"]]
+    # Last deleted first. A mail deleted outside Apport has no time; its arrival is the best
+    # bound there is, it cannot have been deleted before it came.
+    messages.sort(key=lambda m: m.get("deleted_at") or m.get("date") or "", reverse=True)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "accounts": sorted(

@@ -36,6 +36,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
+import deletions
 import inbox_m365
 import newsletters
 import users
@@ -532,24 +533,89 @@ def _target_folder(conn: imaplib.IMAP4, action: str) -> str:
     return target
 
 
-def _move(conn: imaplib.IMAP4, uid: str, target: str) -> None:
+def _move(conn: imaplib.IMAP4, uid: str, target: str) -> tuple[str, str] | None:
+    """Moves one message; returns (UIDVALIDITY, UID) it has in `target` when the server says (UIDPLUS)."""
     # imaplib keeps the pre-login CAPABILITY list; Gmail only announces MOVE after login.
     status, data = conn.capability()
     capabilities = set(data[0].decode().upper().split()) if status == "OK" and data and data[0] else set()
     mailbox = _quote_mailbox(target)
+    conn.response("COPYUID")  # drop a stale one
     if "MOVE" in capabilities:
         status, data = conn.uid("MOVE", uid, mailbox)
         if status != "OK":
             raise HTTPException(status_code=502, detail=f"MOVE failed: {data}")
-        return
+        return _copyuid(conn, data)
     status, data = conn.uid("COPY", uid, mailbox)
     if status != "OK":
         raise HTTPException(status_code=502, detail=f"COPY failed: {data}")
+    moved = _copyuid(conn, data)
     conn.uid("STORE", uid, "+FLAGS.SILENT", "(\\Deleted)")
     if "UIDPLUS" in capabilities:
         conn.uid("EXPUNGE", uid)
     else:
         conn.expunge()
+    return moved
+
+
+def _copyuid(conn: imaplib.IMAP4, data: Any) -> tuple[str, str] | None:
+    # RFC 4315: "[COPYUID <uidvalidity> <source uids> <target uids>]"; on COPY in the tagged answer,
+    # on MOVE (RFC 6851) in an untagged OK, which imaplib files under "COPYUID".
+    for item in data or []:
+        text = item.decode(errors="replace") if isinstance(item, bytes) else str(item)
+        match = re.search(r"\[COPYUID (\d+) \d+ (\d+)\]", text)
+        if match:
+            return match.group(1), match.group(2)
+    _, untagged = conn.response("COPYUID")
+    for item in untagged or []:
+        if not item:
+            continue
+        text = item.decode(errors="replace") if isinstance(item, bytes) else str(item)
+        match = re.match(r"(\d+) \d+ (\d+)$", text.strip())
+        if match:
+            return match.group(1), match.group(2)
+    return None
+
+
+def _message_id(conn: imaplib.IMAP4, uid: str) -> str | None:
+    """Message-ID of a UID in the selected folder, "" without one, None when the UID is gone.
+
+    Replaces UID SEARCH as the existence check: Gmail takes about 1.5 s for any SEARCH."""
+    status, data = conn.uid("FETCH", uid, "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+    if status != "OK":
+        return None
+    for item in data or []:
+        if isinstance(item, tuple) and len(item) >= 2 and re.search(rb"UID %s\b" % uid.encode(), item[0]):
+            headers = BytesHeaderParser(policy=policy.default).parsebytes(item[1])
+            return str(headers.get("Message-ID", "")).strip()
+        # An empty header section may come back as a quoted "" instead of a literal.
+        if isinstance(item, bytes) and re.search(rb"UID %s\b" % uid.encode(), item):
+            return ""
+    return None
+
+
+def _find_moved(conn: imaplib.IMAP4, folder: str, message_id: str) -> tuple[str, str] | None:
+    """Without UIDPLUS: look the message up in `folder` by its Message-ID, newest copy wins."""
+    if not message_id or '"' in message_id or "\\" in message_id:
+        return None
+    status, _ = conn.select(_quote_mailbox(folder), readonly=True)
+    if status != "OK":
+        return None
+    validity = _uidvalidity(conn)
+    status, data = conn.uid("SEARCH", None, f'HEADER Message-ID "{message_id}"')
+    uids = data[0].split() if status == "OK" and data and data[0] else []
+    return (validity, max(uids, key=int).decode()) if uids else None
+
+
+def _move_to_trash(conn: imaplib.IMAP4, account: Account, uid: str) -> dict[str, Any]:
+    """Moves to trash and returns the mail's id there, so a shake in the app can undo it."""
+    message_id = _message_id(conn, uid) or ""
+    target = _target_folder(conn, "delete")
+    moved = _move(conn, uid, target) or _find_moved(conn, target, message_id)
+    result: dict[str, Any] = {"ok": True, "moved_to": target}
+    if moved:
+        result["trash_id"] = f"{account.id}:{moved[0]}:{moved[1]}"
+        deletions.record(result["trash_id"])
+    return result
 
 
 ACTIONS = {"archive", "delete", "read", "unread"}
@@ -599,15 +665,15 @@ def _imap_action(
         current = _uidvalidity(conn)
         if current != uidvalidity:
             raise HTTPException(status_code=409, detail="Mailbox changed, reload the inbox")
-        status, data = conn.uid("SEARCH", None, f"UID {uid}")
-        if status != "OK" or not data or not data[0]:
+        if _message_id(conn, uid) is None:
             raise HTTPException(status_code=404, detail=f"Message is no longer in {folder}")
         if box != "inbox":
             # Out of spam: "notspam" back to the inbox (Gmail learns from that), "delete" to trash.
             # Out of trash: "restore" back to the inbox.
-            target = "INBOX" if action in ("notspam", "restore") else _target_folder(conn, "delete")
-            _move(conn, uid, target)
-            return {"ok": True, "moved_to": target}
+            if action not in ("notspam", "restore"):
+                return _move_to_trash(conn, account, uid)
+            _move(conn, uid, "INBOX")
+            return {"ok": True, "moved_to": "INBOX"}
         if action == "read":
             conn.uid("STORE", uid, "+FLAGS.SILENT", "(\\Seen)")
             _set_cached_seen(item_id, True)
@@ -616,10 +682,14 @@ def _imap_action(
             conn.uid("STORE", uid, "-FLAGS.SILENT", "(\\Seen)")
             _set_cached_seen(item_id, False)
             return {"ok": True}
-        target = _target_folder(conn, action)
-        _move(conn, uid, target)
+        if action == "delete":
+            result = _move_to_trash(conn, account, uid)
+        else:
+            target = _target_folder(conn, action)
+            _move(conn, uid, target)
+            result = {"ok": True, "moved_to": target}
         _forget_cached(item_id)
-        return {"ok": True, "moved_to": target}
+        return result
 
 
 _RAW_LOCK = threading.Lock()
