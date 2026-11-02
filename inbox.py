@@ -543,14 +543,20 @@ def _move(conn: imaplib.IMAP4, uid: str, target: str) -> tuple[str, str] | None:
     capabilities = set(data[0].decode().upper().split()) if status == "OK" and data and data[0] else set()
     mailbox = _quote_mailbox(target)
     conn.response("COPYUID")  # drop a stale one
-    if "MOVE" in capabilities:
-        status, data = conn.uid("MOVE", uid, mailbox)
-        if status != "OK":
-            raise HTTPException(status_code=502, detail=f"MOVE failed: {data}")
-        return _copyuid(conn, data)
-    status, data = conn.uid("COPY", uid, mailbox)
+    command = "MOVE" if "MOVE" in capabilities else "COPY"
+    # Gmail turns a single MOVE down now and then (2026-11-02 12:10, delete answered 502, the next
+    # one went through); one more try after a pause before the app is told.
+    for attempt in (1, 2):
+        status, data = conn.uid(command, uid, mailbox)
+        if status == "OK":
+            break
+        print(f"{command} {uid} -> {target} failed (attempt {attempt}): {data}", flush=True)
+        if attempt == 1:
+            time.sleep(1)
     if status != "OK":
-        raise HTTPException(status_code=502, detail=f"COPY failed: {data}")
+        raise HTTPException(status_code=502, detail=f"{command} failed: {data}")
+    if command == "MOVE":
+        return _copyuid(conn, data)
     moved = _copyuid(conn, data)
     conn.uid("STORE", uid, "+FLAGS.SILENT", "(\\Deleted)")
     if "UIDPLUS" in capabilities:
