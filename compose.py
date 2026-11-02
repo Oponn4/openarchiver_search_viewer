@@ -37,6 +37,7 @@ from email.parser import BytesParser
 from email.utils import format_datetime, formataddr, getaddresses, make_msgid, parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -206,9 +207,28 @@ def save_account_settings(account_id: str, body: AccountSettings) -> dict[str, A
 
 
 def _original(item_id: str, box: str) -> tuple[inbox.Account | GraphAccount, Any]:
+    if box == "mail":
+        return _archived_original(item_id)
     if box not in ("inbox", "spam", "sent", "trash", "archive"):
         raise HTTPException(status_code=400, detail="Unknown box")
     account, payload = inbox._raw(item_id, box)
+    return account, BytesParser(policy=policy.default).parsebytes(payload)
+
+
+def _archived_original(item_id: str) -> tuple[inbox.Account | GraphAccount, Any]:
+    """A search hit: the raw mail from Open Archiver, sent from the account that archived it."""
+    viewer = inbox._viewer()
+    try:
+        message_id = UUID(item_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Unknown mail") from None
+    viewer.ensure_mail_allowed(message_id)
+    source_id = viewer.archived_source_id(message_id)
+    if source_id is None:
+        raise HTTPException(status_code=404, detail="Unknown mail")
+    # 404 when that source is not a mailbox Apport sends from (paused, or another provider).
+    account = inbox.account_by_id(source_id)
+    _, payload = viewer.archived_raw(message_id)
     return account, BytesParser(policy=policy.default).parsebytes(payload)
 
 
@@ -339,7 +359,8 @@ def compose_start(item: str, mode: str, box: str = "inbox") -> dict[str, Any]:
                 "sizeBytes": len(data),
                 "mimeType": inbox._viewer().normalized_mime_type(filename, part.get_content_type(), data),
                 # Same route the mail view uses, so the phone can preview before forwarding.
-                "viewUrl": f"/api/{box}/{item}/attachments/{index}",
+                # Search hits number attachments differently (Open Archiver ids): no preview there.
+                "viewUrl": None if box == "mail" else f"/api/{box}/{item}/attachments/{index}",
             })
     subject = str(message.get("Subject", ""))
     return {

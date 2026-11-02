@@ -1348,9 +1348,8 @@ def get_mail(message_id: UUID) -> dict[str, Any]:
     }
 
 
-@app.get("/api/mail/{message_id}/eml", dependencies=[Depends(verify_api_auth)])
-def download_eml(message_id: UUID) -> Response:
-    ensure_mail_allowed(message_id)
+def archived_raw(message_id: UUID) -> tuple[dict[str, Any], bytes]:
+    """Open Archiver's payload and the raw mail; the caller checks access first."""
     settings = SETTINGS
     payload = fetch_mail_payload(settings, message_id)
     
@@ -1376,6 +1375,21 @@ def download_eml(message_id: UUID) -> Response:
         
     if not response_content:
         raise HTTPException(status_code=404, detail=t("missingEmlData"))
+    return payload, response_content
+
+
+def archived_source_id(message_id: UUID) -> str | None:
+    with psycopg.connect(os.environ.get("OA_DATABASE_URL", ""), connect_timeout=5) as conn:
+        row = conn.execute(
+            "select ingestion_source_id from archived_emails where id = %s", (str(message_id),)
+        ).fetchone()
+    return str(row[0]) if row else None
+
+
+@app.get("/api/mail/{message_id}/eml", dependencies=[Depends(verify_api_auth)])
+def download_eml(message_id: UUID) -> Response:
+    ensure_mail_allowed(message_id)
+    payload, response_content = archived_raw(message_id)
 
     subject = str(payload.get("subject") or "").strip()
     safe_subject = re.sub(r'[\\/*?:"<>|]', "", subject).strip()
