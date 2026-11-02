@@ -36,6 +36,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
+import archivelog
 import deletions
 import inbox_m365
 import newsletters
@@ -329,9 +330,11 @@ def _references(headers: Any) -> list[str]:
 
 
 def mailbox_name(conn: imaplib.IMAP4, box: str) -> str:
-    """Folder behind a box: "inbox", "spam", "sent" or "trash" (special-use flag, else a known name)."""
+    """Folder behind a box: "inbox", "spam", "sent", "trash" or "archive" (special-use flag, else a known name)."""
     if box == "inbox":
         return "INBOX"
+    if box == "archive":
+        return _target_folder(conn, "archive")
     if box not in BOX_FLAGS:
         raise HTTPException(status_code=400, detail="Unknown box")
     folders = special_folders(conn)
@@ -606,6 +609,24 @@ def _find_moved(conn: imaplib.IMAP4, folder: str, message_id: str) -> tuple[str,
     return (validity, max(uids, key=int).decode()) if uids else None
 
 
+def _move_to_archive(conn: imaplib.IMAP4, account: Account, uid: str) -> dict[str, Any]:
+    """Archives and records it (archivelog.py) under the mail's id in the archive folder."""
+    status, data = conn.uid("FETCH", uid, f"(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS ({HEADER_FIELDS})])")
+    parsed = _parse_fetch(data) if status == "OK" else []
+    message = parsed[0] if parsed else None
+    target = _target_folder(conn, "archive")
+    moved = _move(conn, uid, target) or (_find_moved(conn, target, message["message_id"]) if message else None)
+    result: dict[str, Any] = {"ok": True, "moved_to": target}
+    if moved:
+        result["archive_id"] = f"{account.id}:{moved[0]}:{moved[1]}"
+        if message:
+            archivelog.record(
+                result["archive_id"],
+                {**message, "uid": int(moved[1]), "account_id": account.id, "account": account.name},
+            )
+    return result
+
+
 def _move_to_trash(conn: imaplib.IMAP4, account: Account, uid: str) -> dict[str, Any]:
     """Moves to trash and returns the mail's id there, so a shake in the app can undo it."""
     message_id = _message_id(conn, uid) or ""
@@ -633,6 +654,9 @@ def inbox_action(item_id: str, action: str) -> dict[str, Any]:
         if not isinstance(account, GraphAccount):
             raise HTTPException(status_code=400, detail="Malformed message id")
         result = inbox_m365.act(account, inbox_m365.decode_id(encoded), action)
+        moved_message = result.pop("message", None)
+        if action == "archive" and result.get("archive_id") and moved_message:
+            archivelog.record(result["archive_id"], moved_message)
         if action in ("read", "unread"):
             _set_cached_seen(item_id, action == "read")
         else:
@@ -669,10 +693,16 @@ def _imap_action(
             raise HTTPException(status_code=404, detail=f"Message is no longer in {folder}")
         if box != "inbox":
             # Out of spam: "notspam" back to the inbox (Gmail learns from that), "delete" to trash.
-            # Out of trash: "restore" back to the inbox.
+            # Out of trash or archive: "restore" back to the inbox.
             if action not in ("notspam", "restore"):
                 return _move_to_trash(conn, account, uid)
-            _move(conn, uid, "INBOX")
+            if box == "archive" and special_folders(conn).get("\\all") == folder:
+                # Gmail All Mail: removing a mail from there deletes it. Adding the Inbox label is a COPY.
+                status, data = conn.uid("COPY", uid, "INBOX")
+                if status != "OK":
+                    raise HTTPException(status_code=502, detail=f"COPY failed: {data}")
+            else:
+                _move(conn, uid, "INBOX")
             return {"ok": True, "moved_to": "INBOX"}
         if action == "read":
             conn.uid("STORE", uid, "+FLAGS.SILENT", "(\\Seen)")
@@ -685,9 +715,7 @@ def _imap_action(
         if action == "delete":
             result = _move_to_trash(conn, account, uid)
         else:
-            target = _target_folder(conn, action)
-            _move(conn, uid, target)
-            result = {"ok": True, "moved_to": target}
+            result = _move_to_archive(conn, account, uid)
         _forget_cached(item_id)
         return result
 

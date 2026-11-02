@@ -84,6 +84,12 @@ def trash_action(item_id: str, action: str) -> dict[str, Any]:
     """"restore" moves the mail back to the inbox."""
     if action not in ACTIONS:
         raise HTTPException(status_code=404, detail="Unknown action")
+    return restore(item_id, "trash")
+
+
+def restore(item_id: str, box: str) -> dict[str, Any]:
+    """Moves a mail from `box` ("trash", "archive") back to the inbox; also the shake undo."""
+    action = "restore"
     if item_id.count(":") == 2 and item_id.split(":")[1] == "graph":
         account_id, _, encoded = item_id.split(":")
         account = inbox.account_by_id(account_id)
@@ -98,7 +104,7 @@ def trash_action(item_id: str, action: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Malformed message id")
     for attempt in (1, 2):
         try:
-            result = inbox._imap_action(account, item_id, uidvalidity, uid, action, "trash")
+            result = inbox._imap_action(account, item_id, uidvalidity, uid, action, box)
             inbox.expire_cached(account_id)
             return result
         except (TimeoutError, OSError, imaplib.IMAP4.abort) as error:

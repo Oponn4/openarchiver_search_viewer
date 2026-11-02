@@ -35,7 +35,7 @@ HTTP_TIMEOUT_SECONDS = 20
 IMMUTABLE_IDS = {"Prefer": 'IdType="ImmutableId"'}
 # Well-known Graph folder names; they work in every mailbox language.
 TARGET_FOLDERS = {"archive": "archive", "delete": "deleteditems", "notspam": "inbox", "restore": "inbox"}
-FOLDERS = {"inbox": "inbox", "spam": "junkemail", "sent": "sentitems", "trash": "deleteditems"}
+FOLDERS = {"inbox": "inbox", "spam": "junkemail", "sent": "sentitems", "trash": "deleteditems", "archive": "archive"}
 
 
 @dataclass(frozen=True)
@@ -231,6 +231,36 @@ def _iso(value: str | None) -> str | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
 
 
+def _message(account: GraphAccount, item: dict[str, Any], box: str) -> dict[str, Any]:
+    """One Graph message resource in the shape of the IMAP listing."""
+    sender = (item.get("from") or {}).get("emailAddress") or {}
+    return {
+        "id": f"{account.id}:graph:{_encode_id(item['id'])}",
+        "account_id": account.id,
+        "account": account.name,
+        "uid": None,
+        "seen": bool(item.get("isRead")),
+        "flagged": (item.get("flag") or {}).get("flagStatus") == "flagged",
+        "size": None,
+        "from_name": sender.get("name", ""),
+        "from_address": sender.get("address", ""),
+        "subject": (item.get("subject") or "").replace("\x00", ""),
+        "date": _iso(item.get("receivedDateTime")),
+        "message_id": item.get("internetMessageId", ""),
+        # Graph has no References in the listing; its conversation id groups the thread.
+        "references": [],
+        "conversation_id": item.get("conversationId", ""),
+        "to": [
+            {"name": (entry.get("emailAddress") or {}).get("name", ""), "address": (entry.get("emailAddress") or {}).get("address", "")}
+            for entry in item.get("toRecipients") or []
+            if (entry.get("emailAddress") or {}).get("address")
+        ],
+        "auth_failed": False,
+        # Trash only: when it was moved there (any later change moves it, too).
+        **({"deleted_at": _iso(item.get("lastModifiedDateTime"))} if box == "trash" else {}),
+    }
+
+
 def fetch_inbox(account: GraphAccount, limit: int, box: str = "inbox") -> dict[str, Any]:
     name = FOLDERS[box]
     folder = _graph(account, "GET", f"/me/mailFolders/{name}?$select=totalItemCount,unreadItemCount")
@@ -249,36 +279,7 @@ def fetch_inbox(account: GraphAccount, limit: int, box: str = "inbox") -> dict[s
     )
     if listing.status_code != 200:
         raise RuntimeError(f"Graph messages failed: {listing.status_code}")
-    messages = []
-    for item in listing.json().get("value", []):
-        sender = (item.get("from") or {}).get("emailAddress") or {}
-        messages.append(
-            {
-                "id": f"{account.id}:graph:{_encode_id(item['id'])}",
-                "account_id": account.id,
-                "account": account.name,
-                "uid": None,
-                "seen": bool(item.get("isRead")),
-                "flagged": (item.get("flag") or {}).get("flagStatus") == "flagged",
-                "size": None,
-                "from_name": sender.get("name", ""),
-                "from_address": sender.get("address", ""),
-                "subject": (item.get("subject") or "").replace("\x00", ""),
-                "date": _iso(item.get("receivedDateTime")),
-                "message_id": item.get("internetMessageId", ""),
-                # Graph has no References in the listing; its conversation id groups the thread.
-                "references": [],
-                "conversation_id": item.get("conversationId", ""),
-                "to": [
-                    {"name": (entry.get("emailAddress") or {}).get("name", ""), "address": (entry.get("emailAddress") or {}).get("address", "")}
-                    for entry in item.get("toRecipients") or []
-                    if (entry.get("emailAddress") or {}).get("address")
-                ],
-                "auth_failed": False,
-                # Trash only: when it was moved there (any later change moves it, too).
-                **({"deleted_at": _iso(item.get("lastModifiedDateTime"))} if box == "trash" else {}),
-            }
-        )
+    messages = [_message(account, item, box) for item in listing.json().get("value", [])]
     counts = folder.json()
     return {
         "account_id": account.id,
@@ -328,11 +329,14 @@ def act(account: GraphAccount, graph_id: str, action: str) -> dict[str, Any]:
         return {"ok": True}
     result: dict[str, Any] = {"ok": True, "moved_to": TARGET_FOLDERS[action]}
     # A move answers with the message as it is now, under a new id; the app needs it to undo a delete.
-    if action == "delete":
+    if action in ("delete", "archive"):
         try:
-            moved_id = response.json().get("id")
+            moved = response.json()
         except ValueError:
-            moved_id = None
-        if moved_id:
-            result["trash_id"] = f"{account.id}:graph:{_encode_id(moved_id)}"
+            moved = {}
+        if moved.get("id"):
+            key = "trash_id" if action == "delete" else "archive_id"
+            result[key] = f"{account.id}:graph:{_encode_id(moved['id'])}"
+            if action == "archive":
+                result["message"] = _message(account, moved, "archive")
     return result
