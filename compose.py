@@ -228,8 +228,31 @@ def _archived_original(item_id: str) -> tuple[inbox.Account | GraphAccount, Any]
         raise HTTPException(status_code=404, detail="Unknown mail")
     # 404 when that source is not a mailbox Apport sends from (paused, or another provider).
     account = inbox.account_by_id(source_id)
-    _, payload = viewer.archived_raw(message_id)
-    return account, BytesParser(policy=policy.default).parsebytes(payload)
+    details, payload = viewer.archived_raw(message_id)
+    message = BytesParser(policy=policy.default).parsebytes(payload)
+    _restore_attachments(viewer, message_id, message, details.get("attachments"))
+    return account, message
+
+
+def _restore_attachments(viewer: Any, message_id: UUID, message: Any, listed: Any) -> None:
+    """Open Archiver stores attachments apart from the mail and keeps the stored mail without
+    them. A forward would go out empty-handed; put them back from the archive's store."""
+    if not isinstance(listed, list) or inbox._attachment_parts(message):
+        return
+    for item in listed:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        data, mime_type, filename = viewer._cached_get_attachment_data(message_id, str(item["id"]))
+        maintype, _, subtype = (mime_type or "application/octet-stream").partition("/")
+        message.add_attachment(data, maintype=maintype, subtype=subtype or "octet-stream", filename=filename)
+
+
+@router.get("/api/mail/{item_id}/parts/{index}")
+def archived_part(item_id: str, index: int, download: bool = False) -> Response:
+    """Preview of a search hit's attachment before forwarding it. The archive's own attachment
+    route uses Open Archiver ids; forwarding counts the parts of the raw mail, so this does too."""
+    _, message = _archived_original(item_id)
+    return inbox.part_response(message, index, download)
 
 
 def _own_addresses() -> set[str]:
@@ -359,8 +382,10 @@ def compose_start(item: str, mode: str, box: str = "inbox") -> dict[str, Any]:
                 "sizeBytes": len(data),
                 "mimeType": inbox._viewer().normalized_mime_type(filename, part.get_content_type(), data),
                 # Same route the mail view uses, so the phone can preview before forwarding.
-                # Search hits number attachments differently (Open Archiver ids): no preview there.
-                "viewUrl": None if box == "mail" else f"/api/{box}/{item}/attachments/{index}",
+                "viewUrl": (
+                    f"/api/mail/{item}/parts/{index}" if box == "mail"
+                    else f"/api/{box}/{item}/attachments/{index}"
+                ),
             })
     subject = str(message.get("Subject", ""))
     return {

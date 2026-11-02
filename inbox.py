@@ -927,8 +927,13 @@ def inbox_attachment(item_id: str, index: int, download: bool = False) -> Respon
 
 def attachment_response(item_id: str, index: int, download: bool, box: str) -> Response:
     _, payload = _raw(item_id, box)
+    return part_response(BytesParser(policy=policy.default).parsebytes(payload), index, download)
+
+
+def part_response(message: Any, index: int, download: bool) -> Response:
+    """Attachment number index of a parsed mail, counted as _attachment_parts counts."""
     viewer = _viewer()
-    parts = _attachment_parts(BytesParser(policy=policy.default).parsebytes(payload))
+    parts = _attachment_parts(message)
     if not 0 <= index < len(parts):
         raise HTTPException(status_code=404, detail="Attachment not found")
     part = parts[index]
