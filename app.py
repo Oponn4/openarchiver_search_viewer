@@ -31,6 +31,7 @@ import spam
 import archived
 import trash
 import compose
+import devices
 import logos
 import newsletters
 import push
@@ -361,6 +362,13 @@ async def current_user(request: Request, call_next):
     users.CURRENT.set(user)
     if request.url.path in ("/api/inbox", "/api/spam", "/api/sent", "/api/trash", "/api/archive", "/api/newsletters") and user is None and users.multi_user():
         print(f"no user for {request.url.path}: cookie {'set' if request.cookies.get('auth_token') else 'missing'}", flush=True)
+    # Through the public host only paired devices pass (devices.py); Nginx has checked the certificate.
+    if devices.is_public(request):
+        problem = devices.check_public(request, user)
+        if problem is not None:
+            print(f"public request refused: {problem} path={request.url.path}", flush=True)
+            return JSONResponse({"detail": problem}, status_code=403)
+        devices.note_seen(request)
     return await call_next(request)
 
 
@@ -435,11 +443,16 @@ class LoginRequest(BaseModel):
     password: str
 
 @app.post("/api/login")
-async def login(req: LoginRequest):
+async def login(req: LoginRequest, request: Request):
     if not NEED_LOG_IN:
         return JSONResponse({"success": True})
 
     user = users.user_for_password(req.password, SITE_PASSWORD)
+    # Through the public host a password only works on a device paired by the same user.
+    if user is not None and devices.is_public(request):
+        device = devices.device_for(request)
+        if device is None or device.get("user") != user:
+            user = None
     if user is None:
         await asyncio.sleep(random.uniform(1.0, 3.0))
         raise HTTPException(status_code=401, detail=t("invalidPassword"))
@@ -1161,6 +1174,7 @@ app.include_router(trash.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(archived.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(compose.router, dependencies=[Depends(verify_api_auth)])
 app.include_router(push.router, dependencies=[Depends(verify_api_auth)])
+app.include_router(devices.router, dependencies=[Depends(verify_api_auth)])
 
 
 @app.on_event("startup")
