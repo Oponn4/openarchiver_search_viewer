@@ -442,10 +442,54 @@ def verify_api_auth(auth_token: str | None = Cookie(None)):
 class LoginRequest(BaseModel):
     password: str
 
+
+# Failed logins per source and per zone, as timestamps within LOGIN_WINDOW_SECONDS. A source is a
+# paired device outside and an address at home. The address comes from the proxy and can be forged
+# on the home network, hence the second limit over all home logins together.
+LOGIN_WINDOW_SECONDS = 15 * 60
+LOGIN_MAX_FAILURES = 8
+LOGIN_MAX_FAILURES_ZONE = 50
+LOGIN_FAILURES: dict[str, list[float]] = {}
+
+
+def login_sources(request: Request) -> tuple[str, str]:
+    if devices.is_public(request):
+        return "device:" + (request.headers.get("x-apport-client-serial") or "").strip().lower(), "zone:public"
+    address = request.headers.get("x-real-ip") or (request.client.host if request.client else "")
+    return "address:" + address, "zone:home"
+
+
+def login_blocked_for(request: Request) -> int:
+    """Seconds until this source may try a password again, 0 when it may now."""
+    now = current_timestamp()
+    wait = 0.0
+    for key, limit in zip(login_sources(request), (LOGIN_MAX_FAILURES, LOGIN_MAX_FAILURES_ZONE)):
+        recent = [stamp for stamp in LOGIN_FAILURES.get(key, []) if now - stamp < LOGIN_WINDOW_SECONDS]
+        if recent:
+            LOGIN_FAILURES[key] = recent
+        else:
+            LOGIN_FAILURES.pop(key, None)
+        if len(recent) >= limit:
+            wait = max(wait, recent[-limit] + LOGIN_WINDOW_SECONDS - now)
+    return int(wait) + 1 if wait > 0 else 0
+
+
+def note_login_failure(request: Request) -> None:
+    now = current_timestamp()
+    if len(LOGIN_FAILURES) > 10_000:
+        LOGIN_FAILURES.clear()
+    for key in login_sources(request):
+        LOGIN_FAILURES.setdefault(key, []).append(now)
+
 @app.post("/api/login")
 async def login(req: LoginRequest, request: Request):
     if not NEED_LOG_IN:
         return JSONResponse({"success": True})
+
+    wait = login_blocked_for(request)
+    if wait:
+        print(f"login refused: too many failures from {login_sources(request)[0]}", flush=True)
+        raise HTTPException(status_code=429, detail=t("invalidPassword"), headers={"Retry-After": str(wait)})
 
     user = users.user_for_password(req.password, SITE_PASSWORD)
     # Through the public host a password only works on a device paired by the same user.
@@ -454,9 +498,11 @@ async def login(req: LoginRequest, request: Request):
         if device is None or device.get("user") != user:
             user = None
     if user is None:
+        note_login_failure(request)
         await asyncio.sleep(random.uniform(1.0, 3.0))
         raise HTTPException(status_code=401, detail=t("invalidPassword"))
 
+    LOGIN_FAILURES.pop(login_sources(request)[0], None)
     prune_expired_sessions()
     token = uuid.uuid4().hex
     VALID_SESSIONS[token] = remember_login_expires_at()
@@ -465,6 +511,9 @@ async def login(req: LoginRequest, request: Request):
     print(f"login: user={user} sessions={sum(1 for u in SESSION_USERS.values() if u == user)}", flush=True)
     response = JSONResponse({"success": True})
     cookie_options: dict[str, Any] = {"httponly": True, "samesite": "lax"}
+    # The proxy says how the client reached it; over HTTPS the cookie must never travel in clear.
+    if request.headers.get("x-forwarded-proto") == "https":
+        cookie_options["secure"] = True
     if REMEMBER_LOGIN:
         cookie_options["max_age"] = LOGIN_REMEMBER_SECONDS
     response.set_cookie(key="auth_token", value=token, **cookie_options)

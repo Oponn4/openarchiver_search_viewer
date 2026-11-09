@@ -8,6 +8,11 @@ always overwrites, so a client cannot set them itself:
     X-Apport-Public: 1
     X-Apport-Client-Verify: $ssl_client_verify   (SUCCESS for a valid certificate)
     X-Apport-Client-Serial: $ssl_client_serial    (hex)
+    X-Apport-Client-Fingerprint: $ssl_client_fingerprint   (SHA-1, hex)
+
+The home host sends X-Apport-Internal with the value of APPORT_INTERNAL_KEY instead. When that key
+is set, a request without it counts as public: a proxy host that lost its settings, or a caller that
+reaches this server past the proxy, is then refused instead of being taken for the home network.
 
 A certificate alone is not enough: its serial must still be in devices.json, so removing a device
 here locks it out at once, without touching Nginx. The password login stays on top of that.
@@ -125,7 +130,18 @@ def _serial_key(serial: str | None) -> str:
 
 
 def is_public(request: Request) -> bool:
-    return request.headers.get("x-apport-public") == "1"
+    """Whether a request counts as coming from outside. With APPORT_INTERNAL_KEY set, everything
+    that does not carry that key does."""
+    if request.headers.get("x-apport-public") == "1":
+        return True
+    key = os.environ.get("APPORT_INTERNAL_KEY", "")
+    if not key:
+        return False
+    return not secrets.compare_digest(request.headers.get("x-apport-internal", "").encode(), key.encode())
+
+
+def _fingerprint(request: Request) -> str:
+    return (request.headers.get("x-apport-client-fingerprint") or "").strip().lower()
 
 
 def device_for(request: Request) -> dict[str, Any] | None:
@@ -137,6 +153,11 @@ def device_for(request: Request) -> dict[str, Any] | None:
         return None
     with _LOCK:
         device = _load().get(key)
+    # The serial names the device, the fingerprint pins the one certificate issued for it.
+    if device is not None and device.get("fingerprint") and not secrets.compare_digest(
+        str(device["fingerprint"]).encode(), _fingerprint(request).encode()
+    ):
+        return None
     return device
 
 
@@ -158,8 +179,14 @@ def note_seen(request: Request) -> None:
     with _LOCK:
         devices = _load()
         device = devices.get(key)
-        if device is None or now - float(device.get("lastSeen") or 0) < 60:
+        if device is None:
             return
+        # Devices paired before fingerprints were stored learn theirs on the first request.
+        learned = not device.get("fingerprint") and len(_fingerprint(request)) == 40
+        if not learned and now - float(device.get("lastSeen") or 0) < 60:
+            return
+        if learned:
+            device["fingerprint"] = _fingerprint(request)
         device["lastSeen"] = now
         _save(devices)
 
@@ -213,6 +240,7 @@ def pair(body: PairRequest, request: Request) -> dict[str, Any]:
             "pairedAt": time.time(),
             "expiresAt": cert.not_valid_after_utc.timestamp(),
             "lastSeen": None,
+            "fingerprint": cert.fingerprint(hashes.SHA1()).hex(),
         }
         _save(devices)
     print(f"device paired: user={owner} name={name!r} serial={key}", flush=True)
