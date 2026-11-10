@@ -270,8 +270,19 @@ def _format(pairs: list[tuple[str, str]]) -> list[str]:
         if address.lower() in seen:
             continue
         seen.add(address.lower())
-        result.append(formataddr((name, address)) if name else address)
+        result.append(_display(name, address))
     return result
+
+
+def _display(name: str, address: str) -> str:
+    """'Name <address>' for the app to show. Not formataddr: that turns a name with an umlaut into
+    an encoded word (=?utf-8?q?...?=), which belongs in a mail header and not on the screen."""
+    name = " ".join(name.split())
+    if not name:
+        return address
+    if re.search(r'[()<>@,:;.\[\]"\\]', name):
+        name = '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return f"{name} <{address}>"
 
 
 def _prefixed(subject: str, prefix: str) -> str:
